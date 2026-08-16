@@ -1,246 +1,287 @@
-# Flashi — Arquitetura do Banco de Dados (Supabase / PostgreSQL)
+# Flashi
 
-## 1. Visão geral
+## Documentação técnica completa
 
-13 tabelas em `public`, todas com RLS habilitado, PKs `uuid`, timestamps
-`created_at`/`updated_at` (+ `deleted_at` onde soft delete se aplica).
-Todo o cálculo do algoritmo de repetição espaçada (SM-2, FSRS) acontece na
-camada de aplicação/edge function — o banco só persiste o resultado de
-forma atômica via `record_review()`.
+O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a notas, múltiplos cartões por nota, repetição espaçada, estudo em vários dispositivos, mídia privada, busca semântica, interoperabilidade com Anki e integração futura com ferramentas MCP.
 
-## 2. Decisões de arquitetura (e por que fugi um pouco do brief original)
+Este repositório contém principalmente o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais e um validador local de sintaxe. Ele ainda não contém o frontend, o worker de processamento, o parser completo de `.apkg`, o serviço de embeddings ou o servidor MCP. Esses componentes serão implementados como serviços externos ou Edge Functions que usarão os contratos descritos aqui.
 
-| Decisão | Por quê |
-|---|---|
-| Estado do card (`new`/`learning`/...) vive em `card_learning_state`, **não** em `cards` | `cards` é conteúdo (pode ser de um deck público/compartilhado no futuro); o progresso de estudo é sempre por usuário. Colocar o estado direto no card quebraria multiusuário. |
-| `notes` representa o fato e `cards` representa o exercício | Uma nota pode gerar vários cartões independentes (`basic`, `reverse` ou `cloze`). `cards.fields` continua flexível para manter compatibilidade com o conteúdo já existente. |
-| `decks`/`cards`: sem política de `DELETE` no RLS | Usuário final nunca apaga fisicamente — só via `soft_delete_deck()` (UPDATE de `deleted_at`). Hard delete só é possível com `service_role` (job administrativo), preservando histórico de revisões. |
-| `deck_collaborators` (nova tabela, não pedida explicitamente) | O enum `deck_visibility` já previa `'shared'`, mas nada modelava *quem* tem acesso. Sem essa tabela o valor `'shared'` seria decorativo. |
-| Streak calculado via função (`get_current_streak()`), não armazenado | Uma coluna de streak acumulada tende a dessincronizar silenciosamente. Calcular sob demanda a partir de `daily_statistics` elimina esse risco. |
-| `review_logs` imutável (sem UPDATE/DELETE, garantido em RLS **e** trigger) | É o registro de auditoria/histórico de estudo — nunca deve ser alterável, nem por bug de aplicação nem por acesso direto. |
-| Sem particionamento de `review_logs` agora | Seria otimização prematura. Fica documentado como próximo passo (partição mensal por `reviewed_at`) quando o volume justificar (dezenas de milhões de linhas). |
+> **Estado atual:** as migrações `0001` até `0014` estão versionadas e publicadas. O banco já define os contratos necessários para o produto, mas os workers de FSRS-6, embeddings, importação/exportação Anki e transporte MCP ainda precisam ser desenvolvidos e implantados fora do SQL.
 
-## 3. Diagrama ER
+## 1. Objetivos do sistema
+
+O banco precisa resolver quatro problemas diferentes sem misturar suas responsabilidades. O primeiro é armazenar conteúdo: decks, notas, cartões, templates, tags e mídia. O segundo é armazenar o histórico de estudo por usuário, sem transformar o conteúdo compartilhado em estado global. O terceiro é garantir sincronização confiável entre dispositivos, inclusive quando uma exclusão ocorrer offline. O quarto é oferecer contratos seguros para automações, busca semântica e interoperabilidade com Anki e MCP.
+
+A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Uma nota representa o conteúdo original. Um cartão representa uma forma de estudar esse conteúdo. O estado FSRS ou SM-2 pertence ao par `(usuário, cartão)`, porque duas pessoas podem estudar o mesmo cartão com ritmos e históricos diferentes.
+
+## 2. Escopo e responsabilidades
+
+| Camada | Responsabilidade | Local previsto |
+|---|---|---|
+| PostgreSQL/Supabase | Persistência, integridade referencial, RLS, triggers, índices, RPCs e cursores de sincronização | Este repositório |
+| Supabase Auth | Identidade, JWT e `auth.uid()` usado nas policies | Projeto Supabase |
+| Supabase Storage | Arquivos de imagem, áudio, vídeo e outros anexos | Bucket privado `card-media` |
+| Cliente web/mobile | Interface, cache local, fila offline, renderização de templates e envio autenticado | Projeto futuro |
+| Worker FSRS-6 | Cálculo de agendamento e otimização individual dos pesos | Edge Function ou serviço assíncrono |
+| Worker de embeddings | Geração, atualização e reprocessamento dos vetores semânticos | Edge Function ou serviço assíncrono |
+| Worker Anki | Leitura do ZIP, extração de `collection.anki2`, mídia e conversão de dados | Edge Function ou serviço assíncrono |
+| Adaptador MCP | Transporte JSON-RPC, autenticação, validação de argumentos e exposição das ferramentas | Servidor MCP ou Edge Function |
+
+A separação é deliberada. O banco não deve abrir arquivos ZIP, executar JavaScript de templates, chamar um modelo de embeddings ou falar diretamente o protocolo MCP. Ele deve oferecer transações pequenas, determinísticas e auditáveis para que esses serviços façam seu trabalho sem duplicar regras de segurança.
+
+## 3. Arquitetura de alto nível
 
 ```mermaid
-erDiagram
-    PROFILES ||--o{ DECKS : owns
-    PROFILES ||--o{ CARDS : owns
-    PROFILES ||--o{ TAGS : owns
-    PROFILES ||--|| STUDY_SETTINGS : has
-    DECKS ||--o{ DECKS : "parent of"
-    DECKS ||--o{ CARDS : contains
-    DECKS ||--o{ DECK_COLLABORATORS : "shared with"
-    DECKS ||--o{ USER_DECK_SETTINGS : "configured by"
-    CARD_TEMPLATES ||--o{ CARDS : "defines shape of"
-    CARDS ||--o{ CARD_TAGS : has
-    TAGS ||--o{ CARD_TAGS : tags
-    CARDS ||--o{ CARD_MEDIA : attaches
-    CARDS ||--|| CARD_LEARNING_STATE : "studied via (per user)"
-    CARDS ||--o{ REVIEW_LOGS : "reviewed in"
-    PROFILES ||--o{ DAILY_STATISTICS : accumulates
-
-    PROFILES {
-      uuid id PK
-      text display_name
-      text language
-      text timezone
-    }
-    DECKS {
-      uuid id PK
-      uuid user_id FK
-      uuid parent_deck_id FK
-      text name
-      deck_visibility visibility
-      timestamptz deleted_at
-    }
-    DECK_COLLABORATORS {
-      uuid deck_id FK
-      uuid user_id FK
-      collaborator_role role
-    }
-    CARDS {
-      uuid id PK
-      uuid user_id FK
-      uuid deck_id FK
-      uuid template_id FK
-      jsonb fields
-      timestamptz deleted_at
-    }
-    CARD_TEMPLATES {
-      uuid id PK
-      text name
-      jsonb field_definitions
-    }
-    TAGS {
-      uuid id PK
-      uuid user_id FK
-      text name
-    }
-    CARD_TAGS {
-      uuid card_id FK
-      uuid tag_id FK
-    }
-    CARD_MEDIA {
-      uuid id PK
-      uuid card_id FK
-      media_type media_type
-      text storage_path
-    }
-    CARD_LEARNING_STATE {
-      uuid id PK
-      uuid user_id FK
-      uuid card_id FK
-      card_state state
-      timestamptz due_at
-      numeric ease_factor
-      numeric stability
-    }
-    REVIEW_LOGS {
-      uuid id PK
-      uuid user_id FK
-      uuid card_id FK
-      review_rating rating
-      timestamptz reviewed_at
-    }
-    STUDY_SETTINGS {
-      uuid user_id PK
-      srs_algorithm algorithm
-      int new_cards_per_day
-    }
-    USER_DECK_SETTINGS {
-      uuid user_id FK
-      uuid deck_id FK
-      jsonb overrides
-    }
-    DAILY_STATISTICS {
-      uuid user_id FK
-      date stat_date PK
-      int reviews_count
-    }
+flowchart LR
+    C[Cliente web ou mobile] --> A[Supabase Auth]
+    C --> API[API / Edge Functions]
+    A --> API
+    API --> DB[(PostgreSQL / Supabase)]
+    API --> ST[(Storage privado card-media)]
+    DB --> RLS[RLS + RPCs + triggers]
+    W1[Worker FSRS-6] --> DB
+    W2[Worker embeddings] --> DB
+    W3[Worker Anki] --> DB
+    W3 --> ST
+    MCP[Servidor MCP] --> API
+    API --> AUD[mcp_tool_audit]
 ```
 
-## 4. Consultas essenciais
+O cliente sempre opera com um usuário autenticado. As funções que fazem parte do fluxo de requisição usam `SECURITY INVOKER` quando precisam respeitar o RLS do usuário. As duas exceções principais são os triggers de USN e tombstone, que usam `SECURITY DEFINER` porque precisam atribuir um cursor confiável e registrar exclusões sem permitir que o cliente escolha o valor.
 
-**Cards pendentes agora** (a consulta mais crítica do sistema, já otimizada
-via `idx_learning_due`):
-```sql
-select * from get_due_cards(p_deck_id := null, p_limit := 30);
+O RLS é uma camada de defesa em profundidade. No Supabase, tabelas expostas precisam ter RLS habilitado e policies explícitas; sem uma policy adequada, o acesso pela API não deve ser considerado permitido [1]. O Storage segue a mesma ideia por meio de policies na tabela `storage.objects` [2].
+
+## 4. Estrutura do repositório
+
+As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do schema, mas o Supabase CLI normalmente espera arquivos dentro de `supabase/migrations/`. Antes de usar `supabase db push`, mova ou copie os arquivos para esse diretório, preservando a ordem e os nomes. Como alternativa, execute os scripts em sequência no SQL Editor, em um ambiente de homologação primeiro.
+
+| Arquivo | Tipo | Função |
+|---|---|---|
+| `0001_types.sql` | Migração | Cria os enums de domínio. |
+| `0002_profiles.sql` | Migração | Cria o perfil 1:1 com `auth.users`. |
+| `0003_decks.sql` | Migração | Cria decks, subdecks e colaboradores. |
+| `0004_tags_templates.sql` | Migração | Cria tags e templates de cartão. |
+| `0005_cards_media.sql` | Migração | Cria cartões, relação de tags e metadados de mídia. |
+| `0006_learning_reviews.sql` | Migração | Cria estado de aprendizagem e histórico de revisões. |
+| `0007_settings_statistics.sql` | Migração | Cria configurações de estudo e estatísticas diárias. |
+| `0008_triggers_functions.sql` | Migração | Cria triggers de timestamps, provisionamento e imutabilidade. |
+| `0009_rls_policies.sql` | Migração | Habilita RLS e cria autorização das entidades originais. |
+| `0010_views_rpc.sql` | Migração | Cria a árvore de decks e as RPCs de estudo. |
+| `0011_storage.sql` | Migração | Cria o bucket privado e suas policies. |
+| `0012_fsrs6_notes_embeddings.sql` | Migração | Separa notas e cartões, adiciona Cloze, FSRS-6 e pgvector. |
+| `0013_incremental_sync_usn_graves.sql` | Migração | Adiciona USN global, tombstones e sincronização incremental. |
+| `0014_interoperability_mcp.sql` | Migração | Adiciona provenance, jobs Anki, auditoria MCP e RPCs externas. |
+| `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
+
+## 5. Ordem de implantação e dependências
+
+A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e policies que dependem de objetos anteriores.
+
+```text
+0001_types
+  -> 0002_profiles
+  -> 0003_decks
+  -> 0004_tags_templates
+  -> 0005_cards_media
+  -> 0006_learning_reviews
+  -> 0007_settings_statistics
+  -> 0008_triggers_functions
+  -> 0009_rls_policies
+  -> 0010_views_rpc
+  -> 0011_storage
+  -> 0012_fsrs6_notes_embeddings
+  -> 0013_incremental_sync_usn_graves
+  -> 0014_interoperability_mcp
 ```
 
-**Registrar uma revisão** (atômico: `review_logs` + `card_learning_state` +
-`daily_statistics` em uma transação):
+As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
+
+### 5.1 Procedimento recomendado
+
+Em desenvolvimento, crie um projeto Supabase separado. Faça backup ou snapshot antes de aplicar `0012`, `0013` ou `0014` em uma base com dados reais. Execute a validação local, aplique as migrações em ordem, faça uma sincronização completa de um dispositivo de teste e só depois habilite o cursor incremental.
+
+```bash
+# Na raiz do repositório
+sudo pip3 install pglast
+python3 validate_sql.py
+
+git diff --check
+
+# Depois de configurar o projeto Supabase e mover as migrações
+supabase db push
+```
+
+A aplicação deve verificar a versão do schema. Um deploy que atualiza o cliente antes do banco pode falhar se o cliente chamar `record_review_fsrs6()` ou `get_incremental_sync()` antes da migração correspondente estar disponível.
+
+## 6. Tipos e enums de domínio — `0001_types.sql`
+
+A primeira migração cria os tipos compartilhados por várias tabelas. Ela não cria `pgcrypto`: `gen_random_uuid()` já está disponível na versão de PostgreSQL usada pelo Supabase, conforme a premissa registrada no próprio script.
+
+| Tipo | Valores | Uso |
+|---|---|---|
+| `card_state` | `new`, `learning`, `review`, `relearning` | Estado operacional de um cartão para um usuário. |
+| `review_rating` | `again`, `hard`, `good`, `easy` | Resposta do estudante em uma revisão. |
+| `deck_visibility` | `private`, `shared`, `public` | Visibilidade do deck. |
+| `srs_algorithm` | `sm2`, `fsrs`, `custom` | Algoritmo de agendamento persistido no estado e nas configurações. |
+| `media_type` | `image`, `audio`, `video`, `other` | Tipo lógico do arquivo no Storage. |
+| `collaborator_role` | `viewer`, `editor` | Permissão de colaborador em um deck compartilhado. |
+
+Os valores dos enums são contratos de dados. Não altere ou remova um valor em produção sem antes atualizar o cliente, as RPCs, relatórios e filtros que dependem dele.
+
+## 7. Identidade e perfil — `0002_profiles.sql`
+
+A tabela `public.profiles` é uma extensão 1:1 de `auth.users`. O identificador do perfil é o próprio UUID do usuário autenticado. Ela armazena `display_name`, `avatar_url`, idioma, fuso horário e configurações livres em JSONB.
+
+A criação efetiva do registro ocorre no trigger `trg_auth_user_created`, definido na migração `0008`. O trigger chama `handle_new_user()`, que cria o perfil e as configurações de estudo padrão. O uso de `on conflict do nothing` permite reprocessar o evento sem duplicar dados.
+
+## 8. Decks e compartilhamento — `0003_decks.sql`
+
+`public.decks` representa uma coleção hierárquica de estudo. A coluna `parent_deck_id` permite subdecks. O próprio deck não pode ser seu pai, e o índice único impede dois decks ativos com o mesmo nome, pertencentes ao mesmo usuário e sob o mesmo pai.
+
+A coluna `visibility` possui três estados. `private` é o padrão. `shared` exige registros em `deck_collaborators`; o enum, sozinho, não concede acesso. `public` permite leitura pública conforme as policies da migração `0009`.
+
+A tabela `deck_collaborators` usa chave primária composta `(deck_id, user_id)`. O dono administra os convites e o colaborador pode ler sua própria autorização. A role `viewer` não deve ser usada para escrita de conteúdo. A role `editor` pode ser usada pelo serviço de autorização para permitir edição, mas a policy atual deve ser revisada se o produto passar a aceitar edição real por colaboradores.
+
+O soft delete é feito por `deleted_at`. Não há policy de `DELETE` para decks ou cartões. A função `soft_delete_deck()` marca o deck, seus subdecks diretos e os cartões associados. Essa escolha preserva histórico e permite que a sincronização emita tombstones.
+
+## 9. Tags e templates — `0004_tags_templates.sql`
+
+`public.tags` é uma tabela de tags pertencente a um usuário. O índice único `(user_id, name)` evita a mesma tag repetida para o mesmo proprietário.
+
+`public.card_templates` descreve como um cartão deve ser renderizado. O template pode ser do usuário ou de sistema. `field_definitions` e `card_generation` são JSONB porque templates precisam evoluir sem exigir uma migração para cada novo tipo de campo ou regra de geração.
+
+Antes da migração `0012`, o modelo usava `note_group_id` em cartões como uma aproximação de agrupamento. Esse valor não representa uma relação completa entre uma nota e seus cartões gerados. O modelo oficial passa a ser `notes` mais `note_card_definitions`, com `cards.note_id` obrigatório.
+
+## 10. Cartões, tags e mídia — `0005_cards_media.sql`
+
+`public.cards` é o exercício de estudo. Ele pertence a um deck, possui um template, mantém seus campos flexíveis em `fields` e registra flags de suspensão, arquivamento e soft delete. A migração original também cria índices por usuário, deck, grupo de nota e conteúdo JSONB.
+
+`public.card_tags` é uma tabela de junção com chave primária composta `(card_id, tag_id)`. A relação é simples e evita duplicação de tags no JSON do cartão.
+
+`public.card_media` armazena apenas metadados e o ponteiro para o Storage. Os bytes não ficam no PostgreSQL. Os campos principais são `storage_path`, `media_type`, `mime_type`, tamanho e metadados JSONB. A migração `0012` acrescenta `md5_hash` e `storage_bucket`, permitindo verificar a integridade do arquivo no worker de upload ou importação.
+
+## 11. Estado de estudo e histórico — `0006_learning_reviews.sql`
+
+`public.card_learning_state` mantém uma linha por `(user_id, card_id)`. O conteúdo do cartão pode ser compartilhado, mas esse estado é sempre individual. Ele registra estado, datas, intervalo, fator de facilidade, estabilidade, dificuldade, contadores, suspensão, algoritmo e um `algorithm_state` JSONB para dados específicos.
+
+O índice parcial `idx_learning_due` prioriza a fila de cartões cujo `due_at` chegou e que não estão suspensos. A fila não depende de uma varredura de `review_logs`, portanto o crescimento do histórico não deve degradar diretamente a consulta de cartões pendentes.
+
+`public.review_logs` é o histórico append-only. Cada linha registra usuário, cartão, rating, horário, dados anteriores e posteriores, tempo de estudo, intervalo, estabilidade, dificuldade, dispositivo, sessão e algoritmo. Não há UPDATE ou DELETE autorizado por RLS. O trigger `prevent_review_log_mutation()` também rejeita mutações diretas, criando uma segunda barreira contra alteração acidental.
+
+Em volumes muito altos, o próximo passo é particionar `review_logs` por período de `reviewed_at`. Isso não faz parte das migrações atuais porque particionamento adiciona custo operacional e não deve ser introduzido sem métricas reais.
+
+## 12. Configurações e estatísticas — `0007_settings_statistics.sql`
+
+`public.study_settings` mantém os parâmetros globais do usuário: limites de cartões novos e de revisão, etapas de aprendizagem e relearning, intervalos de graduação, ease inicial, parâmetros FSRS, hora de início do dia e timezone operacional.
+
+`public.user_deck_settings` contém substituições por usuário e deck. O JSONB `overrides` permite ajustar limites ou preferências sem duplicar a configuração global.
+
+`public.daily_statistics` é a fonte de verdade para contadores por dia. Ela registra cartões estudados, novos cartões, revisões, acertos, erros e tempo de estudo. O streak não é armazenado como uma coluna acumulada; `get_current_streak()` calcula a sequência de dias consecutivos a partir dessas estatísticas.
+
+## 13. Triggers e funções de infraestrutura — `0008_triggers_functions.sql`
+
+A função `set_updated_at()` atualiza `updated_at` antes de alterações em perfis, decks, templates, cartões, estados de aprendizagem, configurações de estudo e configurações por deck.
+
+A função `handle_new_user()` é `SECURITY DEFINER` com `search_path` controlado. Ela cria `profiles` e `study_settings` no evento de inserção em `auth.users`. O objetivo é que o restante do sistema possa assumir que um usuário novo tem uma configuração básica.
+
+A função `prevent_review_log_mutation()` lança uma exceção em qualquer `UPDATE` ou `DELETE` de `review_logs`. A imutabilidade é uma regra de auditoria, não apenas uma conveniência da aplicação.
+
+## 14. Row Level Security — `0009_rls_policies.sql`
+
+As policies são organizadas por ownership e visibilidade. Registros pessoais usam `auth.uid() = user_id` ou `auth.uid() = id`. Decks e cartões públicos possuem leitura adicional. Decks compartilhados consultam `deck_collaborators`. Templates de sistema podem ser lidos, mas não editados por usuários comuns.
+
+| Entidade | Leitura | Escrita | Exclusão |
+|---|---|---|---|
+| `profiles` | Próprio perfil | Próprio perfil | Controlada pelo Auth |
+| `decks` | Dono, público ou colaborador conforme a policy | Dono | Soft delete via RPC |
+| `deck_collaborators` | Dono e próprio colaborador | Dono | Dono |
+| `tags` | Dono | Dono | Dono |
+| `card_templates` | Dono e templates de sistema | Dono | Dono |
+| `cards` | Dono, público ou compartilhado | Dono | Soft delete via RPC |
+| `card_tags` | Dono do cartão | Dono | Dono |
+| `card_media` | Dono | Dono | Dono |
+| `card_learning_state` | Próprio usuário | Próprio usuário | Próprio usuário |
+| `review_logs` | Próprio usuário | Insert próprio | Bloqueada |
+| `study_settings` | Próprio usuário | Próprio usuário | Próprio usuário |
+| `user_deck_settings` | Próprio usuário | Próprio usuário | Próprio usuário |
+| `daily_statistics` | Próprio usuário | Próprio usuário | Próprio usuário |
+
+A RLS não substitui a validação da aplicação. O adaptador MCP, os workers e o cliente devem validar payloads antes de chamar uma RPC. A RLS garante que uma chamada autenticada não atravesse a fronteira de ownership definida no banco.
+
+## 15. Views e RPCs de estudo — `0010_views_rpc.sql`
+
+A view recursiva `v_deck_tree` entrega a hierarquia de decks para a interface. Ela deve ser consumida respeitando as policies das tabelas de origem.
+
+A função `get_due_cards(p_deck_id, p_limit)` monta a fila de estudo. Ela considera cartões novos e cartões vencidos, limites de configuração global e limites diários já registrados em `daily_statistics`. A consulta usa o estado por usuário e o índice parcial de vencimento.
+
+A função legada `record_review()` recebe o resultado calculado pela aplicação e grava, em uma única operação, o log, o novo estado do cartão e os agregados diários. O agendamento não é calculado no SQL. Essa função continua útil para compatibilidade SM-2 ou fluxos anteriores, mas o novo fluxo FSRS-6 deve usar `record_review_fsrs6()`.
+
+A função `get_current_streak()` percorre as estatísticas diárias para encontrar a sequência atual. A função `soft_delete_deck()` realiza o soft delete do deck, subdecks e cartões relacionados.
+
+Exemplo de fila:
+
 ```sql
-select record_review(
-  p_card_id           := '...',
-  p_rating             := 'good',
-  p_time_spent_ms      := 4200,
-  p_new_state          := 'review',
-  p_new_interval_days  := 6,
-  p_new_due_at         := now() + interval '6 days',
-  p_new_stability      := 5.8,
-  p_new_difficulty     := 4.1,
-  p_algorithm          := 'fsrs'
+select *
+from public.get_due_cards(
+  p_deck_id := null,
+  p_limit := 30
 );
 ```
 
-**Streak atual:**
-```sql
-select get_current_streak();
+## 16. Storage privado — `0011_storage.sql`
+
+A migração cria o bucket privado `card-media`. O caminho precisa começar com o UUID do usuário:
+
+```text
+card-media/{user_id}/{card_id}/{asset_id}.{extension}
 ```
 
-**Apagar um deck (soft delete, cascateando subdecks e cards):**
-```sql
-select soft_delete_deck('...');
+As policies da tabela `storage.objects` permitem `SELECT`, `INSERT` e `DELETE` somente quando o bucket é `card-media` e a primeira pasta é igual a `auth.uid()`. A aplicação deve gerar o caminho no servidor ou validar o caminho antes do upload. Não use URLs públicas permanentes para essa mídia.
+
+A coluna `card_media.storage_path` deve conter o caminho relativo ao bucket. O worker pode salvar o hash MD5 em `md5_hash` depois de concluir o upload. Um hash diferente indica arquivo corrompido, reenvio incompleto ou colisão de referência e deve ser tratado como erro de integridade.
+
+## 17. Notas, múltiplos cartões, Cloze, FSRS-6 e embeddings — `0012_fsrs6_notes_embeddings.sql`
+
+Esta é a primeira grande migração estrutural. Ela transforma o agrupamento informal de cartões em uma relação explícita entre nota e cartão.
+
+### 17.1 Separação nota-cartão
+
+A tabela `public.notes` guarda os campos originais em `fields`, tags, deck de origem, metadados de edição, soft delete e o vetor semântico opcional. Cada cartão passa a ter `note_id` obrigatório. O backfill cria uma nota para cada `note_group_id` histórico e atualiza os cartões existentes.
+
+A tabela `note_card_definitions` registra como uma nota gera cartões. Ela suporta `basic`, `reverse` e `cloze`, além de ordem, nome, template e dados JSONB da definição. Templates de sistema podem ser consultados, mas só o dono do template pode inserir, atualizar ou excluir definições.
+
+A aplicação deve tratar a nota como fonte original. Quando uma definição mudar, o worker de materialização decide se cria, atualiza, suspende ou remove cartões. O SQL não executa o renderizador do template.
+
+### 17.2 Omissões Cloze
+
+`note_cloze_deletions` registra cada omissão com `cloze_ordinal`, texto, posição opcional e metadados. Uma nota pode ter várias omissões. Cada omissão pode gerar um cartão independente, permitindo suspender `c1` sem suspender `c2`.
+
+O cliente deve impedir ordinais duplicados para a mesma nota e deve reconstruir a exibição Cloze a partir da nota original mais a definição da omissão. O texto final não deve ser duplicado em todas as linhas de cartão.
+
+### 17.3 Persistência FSRS-6
+
+O FSRS deve ser executado na camada de aplicação. A documentação oficial do projeto separa habilitação, configuração, otimização, avaliação e agendamento customizado; o optimizer depende de um histórico consistente de revisões [4].
+
+A migração adiciona a versão do FSRS, retenção desejada, pesos, data da última otimização e contadores em `study_settings`. No estado do cartão, ela adiciona valores persistidos de estabilidade, dificuldade, retratabilidade, dias transcorridos, dias agendados e estado FSRS. Os logs preservam os valores anteriores e posteriores para auditoria e reprocessamento.
+
+O fluxo normal é:
+
+```text
+1. Cliente lê o estado atual do cartão.
+2. Worker FSRS-6 calcula o próximo estado.
+3. Cliente chama record_review_fsrs6().
+4. RPC bloqueia a linha do estado e valida ownership.
+5. RPC insere review_logs.
+6. RPC atualiza card_learning_state.
+7. RPC incrementa daily_statistics.
+8. RPC confirma tudo na mesma transação.
 ```
 
-## 5. Storage
-
-Bucket `card-media`, privado. Caminho obrigatório `{user_id}/...` — a
-policy de `storage.objects` valida isso via `storage.foldername(name)`.
-
-## 6. Sincronização multi-dispositivo
-
-- Cada linha sincronizável tem `updated_at` (e `deleted_at` para soft
-  delete). Cliente guarda `last_synced_at` e busca
-  `where updated_at > $last_sync_at or deleted_at > $last_sync_at`.
-- Resolução de conflito: **last-write-wins** por `updated_at`. Isso é
-  aceitável para conteúdo (decks/cards), mas note a limitação: edições
-  simultâneas em dois dispositivos podem perder uma das duas. Para
-  `review_logs` isso não é problema — são inserts idempotentes (gere o
-  `id` no cliente para deduplicar em reenvios).
-- `device_id`/`session_id` em `review_logs` existem só para diagnóstico de
-  sincronização, não para lógica de negócio.
-
-## 7. Migrações
-
-Arquivos numerados em `db/migrations/`, pensados para rodar via Supabase
-CLI (`supabase db push` ou `supabase migration up`). Todos são
-idempotentes: `create table if not exists`, `create index if not exists`,
-`drop policy if exists` antes de `create policy`, e blocos `do $$ ... $$`
-para enums (Postgres não tem `create type if not exists`).
-
-Ordem de aplicação: `0001` → `0014`, nessa sequência (as dependências de FK
-exigem isso). As migrações `0012`–`0014` são incrementais e idempotentes para
-bases que já aplicaram `0001`–`0011`.
-
-## 8. Autocrítica (checklist do brief)
-
-- **Normalização:** 3FN nas tabelas de conteúdo; `fields`/`settings`/
-  `overrides` em JSONB são exceções deliberadas para extensibilidade, não
-  preguiça de modelagem.
-- **Concorrência:** `record_review()` usa `select ... for update` na linha
-  de `card_learning_state`, evitando corrida entre duas revisões quase
-  simultâneas do mesmo card (ex.: retry de rede).
-- **RLS:** revisado por tabela (seção 2); pontos de atenção deliberados
-  documentados, não escondidos.
-- **Consultas lentas em milhões de linhas:** `get_due_cards()` depende de
-  `idx_learning_due` (parcial, `where is_suspended = false`) — permanece
-  rápida independente do tamanho de `review_logs`, que não participa dessa
-  consulta.
-- **Índices:** evitei indexar `card_tags` além do necessário (a PK
-  composta já cobre a junção mais comum); não há índice redundante.
-- **Escala para milhões de revisões:** ver nota de particionamento acima.
-- **Múltiplos dispositivos:** coberto (seção 6), com limitação honesta
-  documentada (last-write-wins).
-- **Evolução do algoritmo:** `srs_algorithm` enum + `algorithm_state`
-  JSONB por card + `fsrs_params` JSONB por usuário — nenhuma coluna fica
-  amarrada a um único algoritmo.
-- **Compartilhamento futuro de decks:** implementado de forma mínima
-  (`deck_collaborators`), não apenas prometido no enum.
-- **Risco de perda de dados:** `review_logs` imutável; deletes de
-  usuário final são sempre soft; FK cascade físico só é alcançável via
-  `service_role`.
-- **FSRS-6:** `card_learning_state` e `review_logs` persistem estado DSR,
-  retratabilidade, dias transcorridos/agendados e versão dos parâmetros.
-  `enqueue_fsrs_optimization()` só libera uma execução após o limiar padrão de
-  1.000 revisões FSRS; o ajuste numérico deve ser executado por worker/Edge
-  Function e gravado em `fsrs_optimization_runs`.
-- **Notas e Cloze:** `0012` cria `notes`, `note_card_definitions` e
-  `note_cloze_deletions`, migra `note_group_id` histórico e torna `cards.note_id`
-  obrigatório. A aplicação deve renderizar os campos da nota e materializar os
-  cartões gerados.
-- **Semântica:** `notes.embedding` usa `extensions.vector(1536)`, com índice
-  HNSW e RPCs `search_notes_by_embedding()`/`find_similar_notes()`. Embeddings
-  são calculados fora do banco; o banco armazena somente o vetor e o modelo.
-- **Sincronização:** `0013` atribui um USN global em cada insert/update e
-  registra tombstones em `graves`. O cliente deve persistir o maior USN aplicado,
-  processar exclusões e só então avançar o cursor.
-- **Interoperabilidade:** `0014` cria jobs de transferência `.apkg` e os
-  contratos RLS para `mcp_create_note()` e `mcp_search_notes()`. O parser ZIP/
-  SQLite do Anki e o transporte MCP ficam em serviço/Edge Function, nunca em
-  triggers SQL; arquivos binários continuam no Storage, e não em BLOBs.
-
-## 9. Contratos adicionados
-
-### 9.1 FSRS-6 e otimização
-
-A aplicação calcula o próximo estado usando FSRS-6 e chama a RPC abaixo para
-persistir a revisão de forma atômica:
+Exemplo:
 
 ```sql
 select public.record_review_fsrs6(
-  p_card_id := '...',
+  p_card_id := '00000000-0000-0000-0000-000000000000',
   p_rating := 'good',
   p_time_spent_ms := 4200,
   p_new_state := 'review',
@@ -256,71 +297,275 @@ select public.record_review_fsrs6(
 );
 ```
 
-Depois de pelo menos 1.000 logs FSRS, a aplicação pode solicitar uma fila de
-otimização:
+A RPC não deve aceitar que o cliente escolha `user_id`, `usn`, `reviewed_at` de outro usuário ou valores de auditoria que pertençam ao servidor. O usuário é derivado de `auth.uid()`.
+
+### 17.4 Otimização individual
+
+`fsrs_optimization_runs` é uma fila persistente. `enqueue_fsrs_optimization()` não executa machine learning durante a requisição; ela cria uma execução quando o usuário possui revisões suficientes e não há outra execução `queued` ou `running`.
+
+O worker deve:
+
+1. Ler os logs FSRS do usuário.
+2. Validar o conjunto de dados e sua ordem temporal.
+3. Executar uma versão fixa e identificável do optimizer.
+4. Salvar os pesos, a versão do algoritmo e métricas.
+5. Atualizar `study_settings.fsrs_weights` somente após sucesso.
+6. Marcar o job como `completed` ou `failed` com mensagem segura.
+
+`get_fsrs_optimization_status()` retorna contagem de revisões, limiar, existência de job pendente e data da última otimização. O produto deve exibir esse estado de forma clara e nunca afirmar que os pesos foram personalizados se o worker não concluiu a execução.
+
+### 17.5 Busca semântica com pgvector
+
+A coluna `notes.embedding` usa `extensions.vector(1536)`. A extensão PostgreSQL se chama `vector`, e o padrão de usar `extensions.vector(n)` é compatível com a documentação do Supabase [3]. O índice HNSW acelera busca aproximada por distância cosseno. O projeto upstream do pgvector documenta as operações de distância e as características do HNSW [7].
+
+Os embeddings são gerados fora do banco. O worker deve armazenar o modelo, a dimensão, a versão do pipeline e o momento de geração. Se o modelo mudar, não misture vetores de dimensões ou espaços incompatíveis; reprocesse as notas com uma versão nova.
+
+As RPCs `search_notes_by_embedding()` e `find_similar_notes()` aplicam RLS e filtram por usuário, deck ou exclusão lógica. Em consultas vetoriais com filtro adicional, o cliente deve aceitar que um índice aproximado pode retornar menos itens que o limite nominal; a documentação do Supabase recomenda atenção especial a esse caso [3].
+
+Exemplo conceitual:
 
 ```sql
-select public.enqueue_fsrs_optimization();
-select * from public.get_fsrs_optimization_status();
+select *
+from public.search_notes_by_embedding(
+  p_query_embedding := '[0.01, 0.02, ...]'::extensions.vector,
+  p_limit := 20,
+  p_deck_id := null
+);
 ```
 
-O worker deve ler os logs do usuário, otimizar os pesos FSRS-6 usando um
-processo versionado, atualizar `study_settings.fsrs_weights` e finalizar o
-registro correspondente em `fsrs_optimization_runs`. A fila não executa
-otimização dentro de uma requisição SQL, evitando bloquear a sessão de estudo.
+## 18. Sincronização incremental e tombstones — `0013_incremental_sync_usn_graves.sql`
 
-### 9.2 Notas, cartões e Cloze
+A sincronização usa um **USN global atribuído pelo servidor**. A sequence `sync_usn_seq` fornece valores monotônicos. As entidades sincronizáveis recebem uma coluna `usn` e triggers que atribuem um novo valor em insert ou update.
 
-Uma nota guarda os campos de conteúdo em `notes.fields`. Cada cartão aponta
-para a nota por `cards.note_id` e tem seu próprio estado em
-`card_learning_state`. Para Cloze, grave as omissões em
-`note_cloze_deletions` e use `cloze_ordinal` para gerar cartões `c1`, `c2`,
-etc. Isso evita duplicar a frase original em cada cartão e permite suspender
-uma omissão sem suspender as demais.
+As principais entidades cobertas são `decks`, `cards`, `notes`, `card_templates`, `tags`, `card_media`, `card_learning_state`, `review_logs`, `study_settings`, `user_deck_settings`, `daily_statistics`, `note_card_definitions`, `note_cloze_deletions`, `fsrs_optimization_runs` e `card_tags`.
 
-### 9.3 Sincronização incremental
+A tabela `graves` é o registro de exclusões. Ela guarda usuário, tipo da entidade, chave da entidade, USN, momento de exclusão e metadados. Para tabelas com chave composta, como `card_tags`, a chave é serializada de modo determinístico. Uma exclusão lógica também produz grave quando `deleted_at` muda de nulo para uma data.
 
-O cursor do cliente é o maior `usn` confirmado. A chamada abaixo devolve
-alterações e graves em ordem crescente:
+Os triggers `assign_sync_usn()` e `record_sync_grave()` são `SECURITY DEFINER`. Isso evita que um cliente forge o cursor. A função `get_incremental_sync(p_after_usn, p_limit)` devolve alterações ativas e tombstones posteriores ao cursor, ordenados por USN.
+
+Exemplo:
 
 ```sql
-select * from public.get_incremental_sync(
+select *
+from public.get_incremental_sync(
   p_after_usn := 0,
   p_limit := 500
 );
 ```
 
-O cliente deve aplicar primeiro os itens ativos, remover localmente os itens
-com `is_deleted = true` e gravar o último USN somente depois que o lote inteiro
-for confirmado. O USN é atribuído pelo servidor e não deve ser aceito como
-entrada do cliente.
+O cliente deve aplicar o lote inteiro antes de gravar o novo cursor. A sequência segura é:
 
-### 9.4 `.apkg` e MCP
+```text
+1. Enviar o último USN confirmado.
+2. Receber alterações e graves em ordem crescente.
+3. Aplicar upserts de registros ativos.
+4. Aplicar exclusões recebidas em graves.
+5. Confirmar que o lote local foi persistido.
+6. Gravar o maior USN do lote.
+```
 
-`anki_transfer_jobs` registra importações/exportações idempotentes por
-`file_sha256`. O arquivo `.apkg` deve ser enviado para Storage privado; o
-worker extrai `collection.anki2` e mídia, converte notas/templates para o
-modelo normalizado e atualiza os contadores do job.
+Se uma etapa falhar, o cliente deve repetir o mesmo cursor. Upserts e exclusões precisam ser idempotentes. Nunca avance o cursor antes de aplicar todos os itens do lote.
 
-Os contratos MCP são `mcp_search_notes()` para leitura e `mcp_create_note()`
-para criação. O adaptador MCP deve delegar a identidade autenticada do usuário,
-validar os parâmetros de ferramenta antes de chamar a RPC e preservar o
-`request_id` em `mcp_tool_audit`. Nunca exponha `service_role` a um agente ou
-cliente.
+O USN não é um mecanismo de resolução de todos os conflitos. Ele ordena alterações no servidor. Para edições de conteúdo concorrentes, o produto ainda precisa definir uma política, como last-write-wins por `updated_at`, revisão explícita ou merge por campo. Logs de revisão são eventos append-only e podem ser reenviados com UUID idempotente.
 
-## 10. Ordem de implantação
+## 19. Interoperabilidade Anki — primeira parte de `0014_interoperability_mcp.sql`
 
-1. Aplicar `0001` até `0011` em uma base nova ou existente.
-2. Aplicar `0012` para migrar cards históricos, criar notas, habilitar pgvector
-e preparar FSRS-6.
-3. Aplicar `0013` para iniciar o cursor USN e criar graves para exclusões
-futuras.
-4. Aplicar `0014` para habilitar jobs `.apkg`, auditoria MCP e as RPCs de
-interoperabilidade.
-5. Deployar o worker/Edge Function de FSRS-6, embeddings, parser `.apkg` e
-transporte MCP. Esses componentes não fazem parte do schema SQL e devem ser
-versionados separadamente.
+Um pacote `.apkg` representa um pacote de deck Anki. O manual oficial descreve que esses pacotes podem incluir decks, notas, tipos de nota e cartões [5]. O Flashi não abre o ZIP dentro de uma função PostgreSQL. Ele registra o trabalho em `anki_transfer_jobs` e deixa a extração para um worker.
 
-Antes de produção, execute as migrações em um clone do projeto Supabase, valide
-as policies com usuários proprietário/colaborador e faça uma sincronização
-completa antes de habilitar o modo incremental em dispositivos já instalados.
+A tabela de jobs deve ser usada como máquina de estados. O fluxo esperado é:
+
+```text
+queued -> processing -> completed
+                         \-> failed
+```
+
+Cada job possui usuário, direção (`import` ou `export`), hash SHA-256 do arquivo, referência no Storage, status, contadores, erro sanitizado, timestamps e metadados. O hash permite rejeitar ou reutilizar uma transferência idêntica.
+
+### 19.1 Importação
+
+1. O cliente faz upload do `.apkg` para o bucket privado.
+2. A API calcula ou confirma `file_sha256`.
+3. A API cria um job `queued`.
+4. O worker baixa o arquivo com credencial de serviço protegida.
+5. O worker extrai o ZIP e lê `collection.anki2` com uma biblioteca SQLite compatível.
+6. O worker converte decks, notas, tipos de nota, cartões, tags e mídia.
+7. O worker grava provenance em `notes.source_format`, `notes.external_id` e `notes.content_hash`.
+8. O worker atualiza contadores e status do job.
+
+O worker deve tratar o arquivo como não confiável. Ele precisa impor limites de tamanho, quantidade de entradas, compressão, tempo de processamento e extensão de mídia. Nunca execute conteúdo importado como código.
+
+### 19.2 Exportação
+
+1. O cliente seleciona um deck ou conjunto de notas.
+2. A API cria um job `export`.
+3. O worker materializa `collection.anki2` em área temporária.
+4. O worker converte mídia para os nomes esperados pelo Anki.
+5. O worker cria o `.apkg`.
+6. O arquivo é salvo no Storage privado.
+7. O job termina com a referência de download e o hash.
+
+A exportação deve documentar a perda potencial de recursos que não possuem equivalente Anki. Templates avançados, estados de colaboração e embeddings podem exigir uma política de degradação ou metadados auxiliares.
+
+## 20. MCP — segunda parte de `0014_interoperability_mcp.sql`
+
+O Model Context Protocol separa host, cliente e servidor e usa uma camada de dados baseada em JSON-RPC, além de uma camada de transporte. O protocolo define primitives como tools, resources e prompts, mas não define como a aplicação de IA deve usar o contexto [6]. No Flashi, o banco implementa somente contratos de dados seguros; o transporte MCP fica no adaptador.
+
+A tabela `mcp_tool_audit` registra request id, usuário, nome da ferramenta, entrada sanitizada, resultado resumido, latência, status e timestamps. O log não deve armazenar tokens, segredos, conteúdo sensível desnecessário ou o texto integral de um prompt quando isso não for necessário para auditoria.
+
+### 20.1 `mcp_create_note()`
+
+A RPC cria uma nota e seus cartões em uma fronteira transacional. Ela valida o deck, cria a nota, materializa as definições enviadas e inicializa o estado de aprendizagem dos cartões gerados. Se `p_card_definitions` estiver vazio, a função cria um cartão Basic usando os campos `Front` e `Back` quando disponíveis.
+
+A assinatura lógica inclui deck, campos JSONB, template opcional, lista JSONB de definições, provenance e `request_id`. O resultado contém o UUID da nota e a lista de cartões criados. O `request_id` deve ser reutilizável para investigar retries no log de auditoria.
+
+### 20.2 `mcp_search_notes()`
+
+A RPC recebe texto e, opcionalmente, um embedding. Quando há vetor, tenta busca semântica. Quando a busca vetorial não é possível ou não encontra resultado suficiente, usa uma estratégia lexical de fallback. A função respeita RLS, limita o número de resultados e registra a chamada em `mcp_tool_audit`.
+
+O adaptador MCP deve autenticar o usuário antes de chamar a RPC, validar o schema dos argumentos e nunca entregar `service_role` a um agente. O servidor MCP também deve limitar taxa, tamanho de entrada e número de resultados.
+
+### 20.3 `record_review_fsrs6()`
+
+A RPC é o contrato de escrita para revisões FSRS-6. Ela recebe o resultado calculado pelo worker e grava log, estado e estatística em uma única transação. A linha do estado é bloqueada durante a operação para evitar que dois retries concorrentes sobrescrevam o mesmo estado sem coordenação.
+
+O cálculo matemático fica fora da RPC para permitir atualização versionada do scheduler, testes determinísticos e execução assíncrona. A função persiste a versão e os dados suficientes para reproduzir ou auditar o resultado.
+
+## 21. Modelo de dados consolidado
+
+| Tabela | Papel | Chave principal | Propriedade | Soft delete |
+|---|---|---|---|---|
+| `profiles` | Perfil do usuário | `id` | Usuário | Não |
+| `decks` | Coleção hierárquica | `id` | Usuário | Sim |
+| `deck_collaborators` | Grants de compartilhamento | `(deck_id, user_id)` | Deck/usuário | Não |
+| `tags` | Tags pessoais | `id` | Usuário | Não |
+| `card_templates` | Formato de cartões | `id` | Usuário ou sistema | Não |
+| `cards` | Exercícios gerados | `id` | Usuário/deck | Sim |
+| `card_tags` | Junção cartão-tag | `(card_id, tag_id)` | Herda do cartão | Não |
+| `card_media` | Referências de arquivos | `id` | Usuário/cartão | Não |
+| `card_learning_state` | Estado por usuário | `(user_id, card_id)` | Usuário | Não |
+| `review_logs` | Auditoria de revisões | `id` | Usuário | Não; append-only |
+| `study_settings` | Configuração global | `user_id` | Usuário | Não |
+| `user_deck_settings` | Overrides por deck | `(user_id, deck_id)` | Usuário | Não |
+| `daily_statistics` | Agregados diários | `(user_id, stat_date)` | Usuário | Não |
+| `notes` | Conteúdo original | `id` | Usuário/deck | Sim |
+| `note_card_definitions` | Regras de geração | `id` | Dono do template | Não |
+| `note_cloze_deletions` | Omissões Cloze | `id` | Nota | Não |
+| `fsrs_optimization_runs` | Jobs de otimização | `id` | Usuário | Não |
+| `graves` | Tombstones de sync | `id` | Usuário | Registro de exclusão |
+| `anki_transfer_jobs` | Jobs `.apkg` | `id` | Usuário | Não |
+| `mcp_tool_audit` | Auditoria de ferramentas | `id` | Usuário | Não |
+
+## 22. Índices principais
+
+| Índice ou grupo | Objetivo |
+|---|---|
+| Deck por usuário e pai | Renderizar árvore e validar nomes únicos. |
+| Cartão por usuário, deck e grupo histórico | Preservar consultas legadas e a migração de notas. |
+| GIN em `cards.fields` | Busca estrutural em campos JSONB existentes. |
+| `idx_learning_due` | Montar fila de cartões vencidos sem varrer o histórico. |
+| Estado por `(user_id, state)` | Filtrar cartões por estado de aprendizagem. |
+| Logs por usuário/data, cartão e sessão | Relatórios, auditoria e optimizer. |
+| `notes.embedding` com HNSW | Busca aproximada por distância vetorial. |
+| `usn` por usuário | Sincronização incremental. |
+| `graves` por usuário/USN e entidade | Entregar exclusões sem depender da linha apagada. |
+| Hash de mídia e hash de conteúdo | Deduplicação e verificação de integridade. |
+
+Os índices não substituem medição. Depois de popular dados de produção, use `EXPLAIN (ANALYZE, BUFFERS)` nas filas de estudo, nas consultas de sync e na busca semântica. Ajuste `m`, `ef_construction`, `ef_search`, filtros e limites do HNSW somente com dados reais.
+
+## 23. Fluxos completos do produto
+
+### 23.1 Criar uma nota manualmente
+
+O cliente autentica o usuário, valida os campos, escolhe um deck e envia a nota. A API grava `notes`, escolhe ou cria uma definição de cartão, cria `cards` e inicializa `card_learning_state`. Se houver mídia, o upload ocorre primeiro no bucket privado e a tabela `card_media` recebe apenas o ponteiro e o hash.
+
+### 23.2 Estudar um cartão
+
+A API chama `get_due_cards()`. O cliente apresenta o cartão. O worker FSRS-6 calcula o próximo estado a partir do estado atual, rating e horário. A API chama `record_review_fsrs6()`. O banco grava o evento e atualiza o estado atomicamente. O cliente atualiza seu cache local apenas depois de receber sucesso.
+
+### 23.3 Trabalhar offline
+
+O cliente mantém uma fila local de operações. Para cada evento de revisão, deve gerar um UUID estável. Quando voltar à rede, envia eventos em lotes. O servidor preserva logs válidos e o cliente usa `get_incremental_sync()` para receber alterações e graves. O cursor só avança após a persistência local do lote.
+
+### 23.4 Buscar conhecimento relacionado
+
+O worker calcula o embedding da consulta usando o mesmo modelo e dimensão das notas. A API chama `search_notes_by_embedding()`. O filtro de ownership ocorre junto da consulta. A interface mostra nota, deck, score e cartão relacionado, mas não expõe o vetor cru ao usuário final.
+
+## 24. Segurança operacional
+
+Nunca coloque tokens de Supabase, `service_role`, chaves de modelo ou credenciais MCP no README, no frontend ou em uma migration. O `service_role` ignora RLS e deve ser usado somente em workers confiáveis, com secrets gerenciados e logs sem dados sensíveis. A documentação de Storage confirma que chaves de serviço bypassam as policies e não podem ser distribuídas publicamente [2].
+
+Toda RPC exposta pela API deve ter parâmetros limitados, validação de tipos e autorização derivada de `auth.uid()`. Funções `SECURITY DEFINER` precisam manter `search_path` controlado e usar nomes qualificados. Adicione testes que tentem ler e escrever dados de outro usuário.
+
+Arquivos `.apkg`, HTML de cartão, imagens, áudios e campos importados são dados não confiáveis. Não execute JavaScript de template, não extraia ZIP sem limites e não encaminhe texto importado diretamente para ferramentas com capacidade de escrita sem confirmação e autorização.
+
+## 25. Testes obrigatórios
+
+A validação atual é sintática. `validate_sql.py` percorre os arquivos `00*.sql`, chama `pglast.parse_sql()`, imprime a quantidade de statements e retorna código de erro se algum arquivo não puder ser parseado.
+
+```bash
+python3 validate_sql.py
+```
+
+A validação de homologação deve complementar o parser com os testes abaixo.
+
+| Grupo | Teste |
+|---|---|
+| Migração | Aplicar `0001`–`0014` em banco vazio e em clone da base existente. |
+| Idempotência | Executar o conjunto duas vezes e confirmar ausência de mudanças destrutivas. |
+| Auth | Criar usuário e verificar `profiles` e `study_settings` automáticos. |
+| RLS | Tentar ler, inserir, alterar e apagar registros de outro usuário. |
+| Compartilhamento | Validar público, compartilhado, viewer e editor separadamente. |
+| Estudo | Dois requests concorrentes para o mesmo cartão não podem perder estado. |
+| Auditoria | UPDATE/DELETE de `review_logs` deve falhar. |
+| FSRS | Revisão cria log, atualiza estado e incrementa estatística na mesma transação. |
+| Cloze | Uma nota com três omissões gera três cartões independentes. |
+| Embeddings | Modelo incorreto ou dimensão diferente deve ser rejeitado antes do insert. |
+| Sync | Soft delete gera grave e retry com o mesmo cursor é seguro. |
+| Anki | Hash repetido não cria job duplicado sem decisão explícita. |
+| MCP | Toda ferramenta exige autenticação, limita payload e grava auditoria. |
+| Storage | Upload fora de `{user_id}/...` deve falhar. |
+
+## 26. Lacunas e trabalho futuro
+
+O schema está preparado para o produto, mas ainda não é o produto completo. Os próximos componentes necessários são um cliente web/mobile com cache offline, um worker real de FSRS-6, uma fila de jobs, o gerador de embeddings, o parser seguro de `.apkg`, o materializador de templates e o adaptador MCP.
+
+Também será necessário decidir a estratégia de conflito para edições concorrentes de notas. O USN resolve ordenação e entrega, mas não faz merge semântico. A política mínima pode ser last-write-wins por `updated_at`; uma política mais robusta pode usar revisões por campo ou uma fila de conflitos.
+
+Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de `get_incremental_sync()`, taxa de falha do Storage, tempo dos jobs Anki, latência do HNSW, quantidade de jobs FSRS pendentes e taxa de retries de `record_review_fsrs6()`.
+
+## 27. Checklist de implantação
+
+| Etapa | Critério de aceite |
+|---|---|
+| Banco | Todas as migrações aplicadas na ordem, sem erro. |
+| Auth | Usuário novo recebe perfil e configurações padrão. |
+| Segurança | RLS testado com pelo menos dois usuários e um papel não autenticado. |
+| Storage | Bucket privado criado e paths inválidos rejeitados. |
+| Conteúdo | Nota, cartão Basic, Reverse e Cloze testados. |
+| Estudo | Fila, revisão, streak e estatísticas conferidos. |
+| FSRS | Worker calcula, RPC persiste e optimizer atualiza pesos somente após sucesso. |
+| Sync | Cliente aplica graves e só avança cursor após commit local. |
+| Anki | Importação e exportação usam job idempotente e storage privado. |
+| MCP | Ferramentas expostas com auth, limites, auditoria e sem `service_role` no cliente. |
+| Observabilidade | Erros e tempos de RPC/jobs possuem métricas sem conteúdo sensível. |
+| Recuperação | Backup, restore e replay de logs testados em homologação. |
+
+## 28. Referências técnicas
+
+[1]: https://supabase.com/docs/guides/database/postgres/row-level-security "Supabase — Row Level Security"
+
+[2]: https://supabase.com/docs/guides/storage/security/access-control "Supabase — Storage Access Control"
+
+[3]: https://supabase.com/docs/guides/database/extensions/pgvector "Supabase — pgvector: Embeddings and vector similarity"
+
+[4]: https://github.com/open-spaced-repetition/fsrs4anki/blob/main/docs/tutorial.md "Open Spaced Repetition — FSRS tutorial"
+
+[5]: https://docs.ankiweb.net/importing/packaged-decks.html "Anki Manual — Packaged Decks"
+
+[6]: https://modelcontextprotocol.io/docs/learn/architecture "Model Context Protocol — Architecture overview"
+
+[7]: https://github.com/pgvector/pgvector "pgvector — PostgreSQL vector similarity search"
+
+## 29. Licença e contribuição
+
+Antes de definir uma licença pública, confirme a titularidade do código e das contribuições. Para contribuir, abra uma branch, altere as migrations de forma incremental, execute `python3 validate_sql.py`, teste em uma base Supabase descartável e descreva no pull request quais tabelas, policies, RPCs e contratos externos foram afetados.
