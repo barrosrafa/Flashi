@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class FlashiContractsTest(unittest.TestCase):
     def test_all_migrations_parse(self):
         migrations = sorted(ROOT.glob("00*.sql"))
-        self.assertGreaterEqual(len(migrations), 15)
+        self.assertGreaterEqual(len(migrations), 17)
         for migration in migrations:
             with self.subTest(migration=migration.name):
                 statements = parse_sql(migration.read_text(encoding="utf-8"))
@@ -19,6 +19,8 @@ class FlashiContractsTest(unittest.TestCase):
 
     def test_hardening_contracts_are_present(self):
         migration = (ROOT / "0015_hardening_workers_contracts.sql").read_text(encoding="utf-8")
+        security_migration = (ROOT / "0016_security_advisors_hardening.sql").read_text(encoding="utf-8")
+        rls_migration = (ROOT / "0017_fix_rls_recursion_and_fk_indexes.sql").read_text(encoding="utf-8")
         required_fragments = (
             "review_logs_user_client_review_id",
             "record_review_fsrs6_idempotent",
@@ -33,6 +35,12 @@ class FlashiContractsTest(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, migration)
+        for fragment in ("security_invoker", "assign_sync_usn", "record_sync_grave"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, security_migration)
+        for fragment in ("private.is_deck_owner", "private.is_deck_collaborator", "idx_anki_transfer_jobs_source_deck"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, rls_migration)
 
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")

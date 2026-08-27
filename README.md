@@ -73,6 +73,8 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0013_incremental_sync_usn_graves.sql` | Migração | Adiciona USN global, tombstones e sincronização incremental. |
 | `0014_interoperability_mcp.sql` | Migração | Adiciona provenance, jobs Anki, auditoria MCP e RPCs externas. |
 | `0015_hardening_workers_contracts.sql` | Migração | Adiciona idempotência de revisões, integridade SHA-256, índices compostos, sync com ownership e limpeza de mídia órfã. |
+| `0016_security_advisors_hardening.sql` | Migração | Corrige view SECURITY DEFINER, fixa search_path e remove execução pública de funções internas de trigger. |
+| `0017_fix_rls_recursion_and_fk_indexes.sql` | Migração | Isola consultas de ownership/colaboração para evitar recursão RLS e cobre FKs sem índice. |
 | `supabase/functions/` | Edge Functions | Implementa `sync`, `fsrs-review` e `embeddings` em TypeScript/Deno. |
 | `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
 
@@ -96,13 +98,15 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0013_incremental_sync_usn_graves
   -> 0014_interoperability_mcp
   -> 0015_hardening_workers_contracts
+  -> 0016_security_advisors_hardening
+  -> 0017_fix_rls_recursion_and_fk_indexes
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
 
 ### 5.1 Procedimento recomendado
 
-Em desenvolvimento, crie um projeto Supabase separado. Faça backup ou snapshot antes de aplicar `0012`, `0013`, `0014` ou `0015` em uma base com dados reais. Execute a validação local, aplique as migrações em ordem, faça uma sincronização completa de um dispositivo de teste e só depois habilite o cursor incremental.
+Em desenvolvimento, crie um projeto Supabase separado. Faça backup ou snapshot antes de aplicar `0012`, `0013`, `0014`, `0015`, `0016` ou `0017` em uma base com dados reais. Execute a validação local, aplique as migrações em ordem, faça uma sincronização completa de um dispositivo de teste e só depois habilite o cursor incremental.
 
 ```bash
 # Na raiz do repositório
@@ -526,10 +530,10 @@ A validação de homologação deve complementar o parser com os testes abaixo.
 
 | Grupo | Teste |
 |---|---|
-| Migração | Aplicar `0001`–`0015` em banco vazio e em clone da base existente. |
+| Migração | Aplicar `0001`–`0017` em banco vazio e em clone da base existente. |
 | Idempotência | Executar o conjunto duas vezes e confirmar ausência de mudanças destrutivas. |
 | Auth | Criar usuário e verificar `profiles` e `study_settings` automáticos. |
-| RLS | Tentar ler, inserir, alterar e apagar registros de outro usuário. |
+| RLS | Tentar ler, inserir, alterar e apagar registros de outro usuário e testar policies de decks compartilhados sem recursão. |
 | Compartilhamento | Validar público, compartilhado, viewer e editor separadamente. |
 | Estudo | Dois requests concorrentes para o mesmo cartão não podem perder estado. |
 | Auditoria | UPDATE/DELETE de `review_logs` deve falhar. |
@@ -555,7 +559,7 @@ Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de 
 
 | Etapa | Critério de aceite |
 |---|---|
-| Banco | Todas as migrações `0001`–`0015` aplicadas na ordem, sem erro. |
+| Banco | Todas as migrações `0001`–`0017` aplicadas na ordem, sem erro. |
 | Edge Functions | Funções configuradas com variáveis de ambiente e type-check concluído. |
 | Auth | Usuário novo recebe perfil e configurações padrão. |
 | Segurança | RLS testado com pelo menos dois usuários e um papel não autenticado. |

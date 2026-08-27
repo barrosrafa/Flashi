@@ -17,7 +17,7 @@ supabase secrets set \
 
 ## Implantação
 
-Aplique as migrações `0001`–`0015` primeiro. Depois, na raiz do projeto, execute:
+Aplique as migrações `0001`–`0017` primeiro. Depois, na raiz do projeto, execute:
 
 ```bash
 supabase functions deploy sync
