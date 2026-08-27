@@ -9,7 +9,10 @@ import {
 } from "ts-fsrs";
 import {
   boundedInteger,
+  getRequestId,
+  handleCors,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -52,7 +55,7 @@ function asSteps(value: unknown, fallback: number[]): Steps {
   if (!Array.isArray(value)) return fallback.map((minutes) => `${minutes}m`) as Steps;
   const result = value.map((item) => Number(item));
   if (result.some((item) => !Number.isInteger(item) || item < 1 || item > 24 * 60)) {
-    throw new RequestError("Study step values are invalid", 500);
+    throw new Error("Study step values are invalid");
   }
   return result.map((minutes) => `${minutes}m`) as Steps;
 }
@@ -64,16 +67,16 @@ function finiteNumber(value: unknown, fallback: number): number {
 
 function toCardInput(row: Record<string, unknown>, now: Date): CardInput {
   const stateName = String(row.state ?? "new") as LearningState;
-  if (!(stateName in stateMap)) throw new RequestError("Stored card state is invalid", 500);
+  if (!(stateName in stateMap)) throw new Error("Stored card state is invalid");
 
   const lastReview = row.last_reviewed_at ? new Date(String(row.last_reviewed_at)) : null;
   const due = row.due_at ? new Date(String(row.due_at)) : now;
   if (Number.isNaN(due.getTime()) || (lastReview && Number.isNaN(lastReview.getTime()))) {
-    throw new RequestError("Stored card dates are invalid", 500);
+    throw new Error("Stored card dates are invalid");
   }
 
   if (stateName !== "new" && !lastReview) {
-    throw new RequestError("Stored card is missing last_reviewed_at", 500);
+    throw new Error("Stored card is missing last_reviewed_at");
   }
 
   const elapsedDays = lastReview
@@ -98,10 +101,10 @@ function buildParameters(settings: Record<string, unknown> | null): Partial<FSRS
   const desiredRetention = finiteNumber(settings?.fsrs_desired_retention, 0.9);
   const maximumInterval = finiteNumber(settings?.fsrs_maximum_interval_days, 36500);
   if (desiredRetention <= 0.5 || desiredRetention >= 1) {
-    throw new RequestError("Stored FSRS retention is invalid", 500);
+    throw new Error("Stored FSRS retention is invalid");
   }
   if (!Number.isInteger(maximumInterval) || maximumInterval < 1 || maximumInterval > 36500) {
-    throw new RequestError("Stored FSRS maximum interval is invalid", 500);
+    throw new Error("Stored FSRS maximum interval is invalid");
   }
 
   const configuredWeights = settings?.fsrs_weights;
@@ -109,7 +112,7 @@ function buildParameters(settings: Record<string, unknown> | null): Partial<FSRS
     ? configuredWeights.map(Number)
     : undefined;
   if (weights?.some((weight) => !Number.isFinite(weight))) {
-    throw new RequestError("Stored FSRS weights are invalid", 500);
+    throw new Error("Stored FSRS weights are invalid");
   }
 
   return {
@@ -124,18 +127,11 @@ function buildParameters(settings: Record<string, unknown> | null): Partial<FSRS
 }
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
 
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+    return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   }
 
   try {
@@ -224,12 +220,12 @@ Deno.serve(async (request) => {
     );
     if (persistError) {
       if (persistError.message.includes("CARD_STATE_CHANGED")) {
-        return jsonResponse({ error: "Card changed on server; refresh and retry" }, 409);
+        return jsonResponse(request, { error: "Card changed on server; refresh and retry", code: "CARD_STATE_CHANGED", request_id: getRequestId(request) }, 409);
       }
       throw new Error(`FSRS persistence failed: ${persistError.message}`);
     }
 
-    return jsonResponse({
+    return jsonResponse(request, {
       review_id: reviewId,
       client_review_id: clientReviewId,
       card_id: cardId,
@@ -240,6 +236,6 @@ Deno.serve(async (request) => {
       difficulty: nextCard.difficulty,
     });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, request);
   }
 });

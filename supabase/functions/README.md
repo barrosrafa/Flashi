@@ -124,7 +124,7 @@ A exportação atual é de conteúdo, não de histórico completo. Ela cria um m
 
 ## Deploy
 
-Aplique as migrações `0001`–`0023` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021_ai_ingestion_occlusion_references` cria a fila AI, oclusão, referências e tombstones; `0022_harden_image_occlusion_grant` remove EXECUTE público da RPC de oclusão; `0023_security_definer_cleanup` fixa o `search_path` do sync e torna a RPC de oclusão `SECURITY INVOKER`.
+Aplique as migrações em `supabase/migrations/` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021`–`0024` criam e endurecem a fila AI, oclusão, referências, contratos de gamificação e policies. `0025_user_function_rate_limits` cria o contador atômico por usuário/função usado por `embeddings` e `semantic-search`. Em uma base já sincronizada até `0024`, aplique somente `0025` com `supabase db push` ou pelo fluxo de migração homologado.
 
 Com Supabase CLI:
 
@@ -136,6 +136,7 @@ supabase functions deploy semantic-search
 supabase functions deploy fsrs-optimize
 supabase functions deploy fsrs-optimize-worker
 supabase functions deploy anki-transfer
+supabase functions deploy ai-ingest
 ```
 
 Antes do deploy, valide import map e tipos:
@@ -150,7 +151,7 @@ deno check --config supabase/functions/deno.json \
   supabase/functions/_shared/fsrs-optimizer.ts
 ```
 
-As dependências estão pinadas em `deno.json`: `@supabase/supabase-js@2.112.4`, `ts-fsrs@5.4.1`, `fflate@0.8.3`, `@sqlite.org/sqlite-wasm@3.53.0-build1` e `fsrs-browser@6.6.0`.
+As dependências estão pinadas em `deno.json`: `@supabase/supabase-js@2.112.4`, `ts-fsrs@5.4.1`, `fflate@0.8.3`, `@sqlite.org/sqlite-wasm@3.53.0-build1` e `fsrs-browser@6.6.0`. Configure `ALLOWED_ORIGINS` como uma lista separada por vírgulas; origens fora da allowlist não recebem `Access-Control-Allow-Origin`. Configure também `OPENAI_API_KEY` e, opcionalmente, `EMBEDDING_MODEL`. As funções retornam erros como `{ error, code, request_id }`; códigos relevantes incluem `VALIDATION_ERROR`, `NOT_FOUND`, `PROVIDER_UNAVAILABLE`, `RATE_LIMITED` e `CARD_STATE_CHANGED`. `embeddings` e `semantic-search` aplicam 30 chamadas por usuário em uma janela fixa de 60 segundos, além do retry limitado do provedor para HTTP 429/5xx.
 
 ## Testes
 
@@ -166,4 +167,4 @@ python3 validate_sql.py
 python3 validate_readme.py
 ```
 
-O smoke test FSRS inicializa o WASM no Deno e confirma 21 parâmetros. O round-trip Anki gera uma coleção SQLite em memória, testa nota, tags, mídia e rejeição de zip-slip. Testes remotos sem usuário autenticado validam apenas o contrato de borda: endpoints de usuário devem responder `401`, e o worker deve responder `403` a um JWT anônimo. Para validar busca semântica, revisão autenticada, jobs e Storage, é necessário um usuário de homologação e os secrets configurados no próprio projeto; não enviar tokens pelo chat.
+O smoke test FSRS inicializa o WASM no Deno e confirma 21 parâmetros. A função `sync` consulta `limit + 1` registros e devolve no máximo `limit`, evitando uma página final vazia; a regra `cursor_commit_rule` permanece obrigatória. O tipo gerado em `_shared/database.types.ts` é a fonte compartilhada para tabelas e RPCs. O round-trip Anki gera uma coleção SQLite em memória, testa nota, tags, mídia e rejeição de zip-slip. Testes remotos sem usuário autenticado validam apenas o contrato de borda: endpoints de usuário devem responder `401`, e o worker deve responder `403` a um JWT anônimo. Para validar busca semântica, revisão autenticada, jobs e Storage, é necessário um usuário de homologação e os secrets configurados no próprio projeto; não enviar tokens pelo chat.

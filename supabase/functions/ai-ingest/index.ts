@@ -1,5 +1,7 @@
 import {
+  handleCors,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -19,7 +21,7 @@ Deno.serve(async (request) => {
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   }});
-  if (request.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+  if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
 
   try {
     const client = createUserClient(request);
@@ -63,8 +65,8 @@ Deno.serve(async (request) => {
       status: "queued",
     }).select("id, status, created_at").single();
     if (error) throw new Error(`job creation failed: ${error.message}`);
-    return jsonResponse({ job_id: job.id, status: job.status, created_at: job.created_at });
+    return jsonResponse(request, { job_id: job.id, status: job.status, created_at: job.created_at });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, request);
   }
 });

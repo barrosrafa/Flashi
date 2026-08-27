@@ -1,5 +1,7 @@
 import {
+  handleCors,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -315,8 +317,9 @@ async function exportDeck(
 }
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") return new Response("ok");
-  if (request.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
+  if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
 
   let client: ReturnType<typeof createUserClient> | null = null;
   let jobId: string | null = null;
@@ -352,13 +355,13 @@ Deno.serve(async (request) => {
       jobId = String(createdJob);
       const { data: job, error: existingJobError } = await client.from("anki_transfer_jobs").select("id, status").eq("id", jobId).eq("user_id", userId).maybeSingle();
       if (existingJobError) throw new Error(`transfer job query failed: ${existingJobError.message}`);
-      if (job?.status === "completed") return jsonResponse({ job_id: jobId, status: "completed", skipped: true, reason: "same package already imported" });
+      if (job?.status === "completed") return jsonResponse(request, { job_id: jobId, status: "completed", skipped: true, reason: "same package already imported" });
       const { error: runningError } = await client.from("anki_transfer_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId).eq("user_id", userId);
       if (runningError) throw new Error(`transfer job start failed: ${runningError.message}`);
       const result = await importPackage(client, userId, jobId, bytes, targetDeckName);
       const { error: completedError } = await client.from("anki_transfer_jobs").update({ status: "completed", total_notes: result.total_notes, imported_notes: result.imported_notes, imported_cards: result.imported_cards, skipped_notes: result.skipped_notes, completed_at: new Date().toISOString() }).eq("id", jobId).eq("user_id", userId);
       if (completedError) throw new Error(`transfer job completion failed: ${completedError.message}`);
-      return jsonResponse({ job_id: jobId, ...result });
+      return jsonResponse(request, { job_id: jobId, ...result });
     }
 
     const deckId = requireUuid(body.deck_id ?? body.deckId, "deck_id");
@@ -381,11 +384,11 @@ Deno.serve(async (request) => {
     const fileHash = await sha256Hex(result.bytes);
     const { error: completedError } = await client.from("anki_transfer_jobs").update({ status: "completed", storage_path: result.storagePath, file_sha256: fileHash, total_notes: result.totalCards, imported_notes: result.totalCards, completed_at: new Date().toISOString() }).eq("id", jobId).eq("user_id", userId);
     if (completedError) throw new Error(`transfer job completion failed: ${completedError.message}`);
-    return jsonResponse({ job_id: jobId, status: "completed", storage_path: result.storagePath, file_sha256: fileHash, total_cards: result.totalCards, bytes: result.bytes.byteLength });
+    return jsonResponse(request, { job_id: jobId, status: "completed", storage_path: result.storagePath, file_sha256: fileHash, total_cards: result.totalCards, bytes: result.bytes.byteLength });
   } catch (error) {
     if (client && jobId && userId) {
       await client.from("anki_transfer_jobs").update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown transfer error", completed_at: new Date().toISOString() }).eq("id", jobId).eq("user_id", userId);
     }
-    return handleError(error);
+    return handleError(error, request);
   }
 });

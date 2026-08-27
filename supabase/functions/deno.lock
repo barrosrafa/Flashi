@@ -4,7 +4,8 @@
     "npm:@sqlite.org/sqlite-wasm@3.53.0-build1": "3.53.0-build1",
     "npm:@supabase/supabase-js@2.112.4": "2.112.4",
     "npm:fflate@0.8.3": "0.8.3",
-    "npm:fsrs-browser@6.6.0": "6.6.0"
+    "npm:fsrs-browser@6.6.0": "6.6.0",
+    "npm:ts-fsrs@5.4.1": "5.4.1"
   },
   "npm": {
     "@sqlite.org/sqlite-wasm@3.53.0-build1": {
@@ -63,6 +64,9 @@
     },
     "iceberg-js@0.8.1": {
       "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA=="
+    },
+    "ts-fsrs@5.4.1": {
+      "integrity": "sha512-mOp9+oexJexBTkwjg/jQI1aSUQRLIAvbimeKHLSmVdNJPwObugFNKmZkoggH5d6kZ0uaWLboP1Al1DnXAfIb9w=="
     },
     "tslib@2.8.1": {
       "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="

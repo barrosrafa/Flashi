@@ -1,5 +1,7 @@
 import {
+  handleCors,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -11,17 +13,10 @@ import { createUserClient, requireUserId } from "../_shared/supabase.ts";
 import { MAX_REVIEWS, optimizeWeights, toFiniteWeights } from "../_shared/fsrs-optimizer.ts";
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+    return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   }
 
   let client: ReturnType<typeof createUserClient> | null = null;
@@ -41,7 +36,7 @@ Deno.serve(async (request) => {
     if (mode === "request") {
       const { data: runId, error } = await client.rpc("enqueue_fsrs_optimization");
       if (error) throw new Error(`optimization enqueue failed: ${error.message}`);
-      return jsonResponse({ user_id: userId, status: "queued", run_id: runId }, 202);
+      return jsonResponse(request, { user_id: userId, status: "queued", run_id: runId }, 202);
     }
 
     const runId = requireUuid(body.run_id ?? body.runId, "run_id");
@@ -85,7 +80,7 @@ Deno.serve(async (request) => {
     });
     if (completeError) throw new Error(`optimization completion failed: ${completeError.message}`);
 
-    return jsonResponse({
+    return jsonResponse(request, {
       user_id: userId,
       run_id: runId,
       status: "completed",
@@ -100,6 +95,6 @@ Deno.serve(async (request) => {
         p_error_message: error instanceof Error ? error.message : "Unknown optimizer error",
       });
     }
-    return handleError(error);
+    return handleError(error, request);
   }
 });

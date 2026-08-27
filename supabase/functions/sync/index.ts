@@ -1,12 +1,15 @@
 import {
+  handleCors,
   boundedInteger,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
   RequestError,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
+import type { Database } from "../_shared/database.types.ts";
 
 function parseUsn(value: unknown): string {
   if (value === undefined || value === null) return "0";
@@ -32,18 +35,11 @@ function maxReturnedUsn(rows: Array<{ usn?: number | string }>, fallback: string
 }
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
 
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+    return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   }
 
   try {
@@ -55,27 +51,23 @@ Deno.serve(async (request) => {
 
     const { data, error } = await client.rpc("get_incremental_sync", {
       p_after_usn: lastUsn,
-      p_limit: limit,
+      p_limit: limit + 1,
     });
     if (error) throw new Error(`incremental sync RPC failed: ${error.message}`);
 
-    const rows = (data ?? []) as Array<{
-      entity_type: string;
-      entity_key: string;
-      usn: number | string;
-      is_deleted: boolean;
-      payload: Record<string, unknown>;
-    }>;
+    const fetchedRows = (data ?? []) as Database["public"]["Functions"]["get_incremental_sync"]["Returns"];
+    const hasMore = fetchedRows.length > limit;
+    const rows = fetchedRows.slice(0, limit);
     const nextUsn = maxReturnedUsn(rows, lastUsn);
 
-    return jsonResponse({
+    return jsonResponse(request, {
       data: rows,
       next_usn: nextUsn,
-      has_more: rows.length >= limit,
+      has_more: hasMore,
       // The client must persist the batch before replacing its local cursor.
       cursor_commit_rule: "apply_all_then_commit_next_usn",
     });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, request);
   }
 });

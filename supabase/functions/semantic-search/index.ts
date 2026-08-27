@@ -1,6 +1,8 @@
 import {
+  handleCors,
   boundedInteger,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -9,68 +11,25 @@ import {
   sha256Hex,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
+import { enforceUserRateLimit } from "../_shared/rate-limit.ts";
 
-const MODEL = Deno.env.get("EMBEDDING_MODEL") ?? "text-embedding-3-small";
-const DIMENSIONS = 1536;
 const MAX_QUERY_CHARS = 8_000;
 
 type SearchMode = "semantic" | "lexical";
 
-function requiredEnv(name: string): string {
-  const value = Deno.env.get(name);
-  if (!value) throw new RequestError(`${name} is not configured`, 503);
-  return value;
-}
-
-async function requestEmbedding(input: string): Promise<number[]> {
-  const response = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${requiredEnv("OPENAI_API_KEY")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      input,
-      encoding_format: "float",
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Embedding provider returned HTTP ${response.status}`);
-  }
-  const payload = await response.json() as {
-    data?: Array<{ embedding?: unknown }>;
-  };
-  const embedding = payload.data?.[0]?.embedding;
-  if (!Array.isArray(embedding) || embedding.length !== DIMENSIONS) {
-    throw new Error(`Embedding dimension mismatch for ${MODEL}`);
-  }
-  const numericEmbedding = embedding.map(Number);
-  if (numericEmbedding.some((value) => !Number.isFinite(value))) {
-    throw new Error("Embedding contains non-finite values");
-  }
-  return numericEmbedding;
-}
+import { DIMENSIONS, MODEL, requestEmbedding } from "../_shared/embeddings.ts";
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+    return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   }
 
   try {
     const client = createUserClient(request);
     const userId = await requireUserId(client);
+    await enforceUserRateLimit(client, "semantic-search", 30, 60);
     const body = requireRecord(await readJson(request));
     const query = requireString(body.query, "query", { maxLength: MAX_QUERY_CHARS });
     const limit = boundedInteger(body.limit, "limit", 1, 100, 20);
@@ -101,7 +60,7 @@ Deno.serve(async (request) => {
     });
     if (error) throw new Error(`semantic search failed: ${error.message}`);
 
-    return jsonResponse({
+    return jsonResponse(request, {
       user_id: userId,
       mode,
       model: mode === "semantic" ? MODEL : null,
@@ -110,6 +69,6 @@ Deno.serve(async (request) => {
       results: data ?? [],
     });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, request);
   }
 });

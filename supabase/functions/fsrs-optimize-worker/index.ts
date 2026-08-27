@@ -1,5 +1,5 @@
 import { optimizeWeights, MAX_REVIEWS, toFiniteWeights } from "../_shared/fsrs-optimizer.ts";
-import { jsonResponse } from "../_shared/http.ts";
+import { errorResponse, handleCors, handleError, jsonResponse } from "../_shared/http.ts";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 function requiredEnv(name: string): string {
@@ -32,9 +32,10 @@ function createAdminClient(): SupabaseClient {
 }
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") return new Response("ok");
-  if (request.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
-  if (jwtRole(request) !== "service_role") return jsonResponse({ error: "Forbidden" }, 403);
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
+  if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
+  if (jwtRole(request) !== "service_role") return errorResponse(request, "Forbidden", 403, "FORBIDDEN");
 
   try {
     const client = createAdminClient();
@@ -96,9 +97,8 @@ Deno.serve(async (request) => {
       }
     }
 
-    return jsonResponse({ processed: results.length, results });
+    return jsonResponse(request, { processed: results.length, results });
   } catch (error) {
-    console.error(error);
-    return jsonResponse({ error: "Internal server error" }, 500);
+    return handleError(error, request);
   }
 });

@@ -1,5 +1,7 @@
 import {
+  handleCors,
   handleError,
+  errorResponse,
   jsonResponse,
   readJson,
   requireRecord,
@@ -8,16 +10,9 @@ import {
   sha256Hex,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
+import { enforceUserRateLimit } from "../_shared/rate-limit.ts";
 
-const MODEL = Deno.env.get("EMBEDDING_MODEL") ?? "text-embedding-3-small";
-const DIMENSIONS = 1536;
 const MAX_TEXT_CHARS = 50_000;
-
-function requiredEnv(name: string): string {
-  const value = Deno.env.get(name);
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
-  return value;
-}
 
 function flattenText(value: unknown, path = ""): string[] {
   if (typeof value === "string") {
@@ -27,69 +22,27 @@ function flattenText(value: unknown, path = ""): string[] {
   if (typeof value === "number" || typeof value === "boolean") {
     return [path ? `${path}: ${String(value)}` : String(value)];
   }
-  if (Array.isArray(value)) {
-    return value.flatMap((item, index) => flattenText(item, `${path}[${index}]`));
-  }
+  if (Array.isArray(value)) return value.flatMap((item, index) => flattenText(item, `${path}[${index}]`));
   if (typeof value === "object" && value !== null) {
-    return Object.entries(value).flatMap(([key, item]) =>
-      flattenText(item, path ? `${path}.${key}` : key)
-    );
+    return Object.entries(value).flatMap(([key, item]) => flattenText(item, path ? `${path}.${key}` : key));
   }
   return [];
 }
 
-async function requestEmbedding(input: string): Promise<number[]> {
-  const response = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${requiredEnv("OPENAI_API_KEY")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      input,
-      encoding_format: "float",
-    }),
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  if (!response.ok) {
-    // Keep provider details out of the client response and project logs.
-    throw new Error(`Embedding provider returned HTTP ${response.status}`);
-  }
-
-  const payload = await response.json() as {
-    data?: Array<{ embedding?: unknown }>;
-  };
-  const embedding = payload.data?.[0]?.embedding;
-  if (!Array.isArray(embedding) || embedding.length !== DIMENSIONS) {
-    throw new Error(`Embedding dimension mismatch for ${MODEL}`);
-  }
-  const numericEmbedding = embedding.map(Number);
-  if (numericEmbedding.some((value) => !Number.isFinite(value))) {
-    throw new Error("Embedding contains non-finite values");
-  }
-  return numericEmbedding;
-}
+import { DIMENSIONS, MODEL, requestEmbedding } from "../_shared/embeddings.ts";
 
 Deno.serve(async (request) => {
-  if (request.method === "OPTIONS") {
-    return new Response("ok", {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-    });
-  }
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
 
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed" }, 405, { Allow: "POST, OPTIONS" });
+    return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   }
 
   try {
     const client = createUserClient(request);
     const userId = await requireUserId(client);
+    await enforceUserRateLimit(client, "embeddings", 30, 60);
     const body = requireRecord(await readJson(request));
     const noteId = requireUuid(body.note_id ?? body.noteId, "note_id");
 
@@ -110,7 +63,7 @@ Deno.serve(async (request) => {
       note.embedding_model === MODEL &&
       note.embedding_content_hash === contentHash
     ) {
-      return jsonResponse({
+      return jsonResponse(request, {
         note_id: noteId,
         model: MODEL,
         dimensions: DIMENSIONS,
@@ -133,7 +86,7 @@ Deno.serve(async (request) => {
       .eq("user_id", userId);
     if (updateError) throw new Error(`embedding persistence failed: ${updateError.message}`);
 
-    return jsonResponse({
+    return jsonResponse(request, {
       note_id: noteId,
       model: MODEL,
       dimensions: DIMENSIONS,
@@ -141,6 +94,6 @@ Deno.serve(async (request) => {
       skipped: false,
     });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, request);
   }
 });
