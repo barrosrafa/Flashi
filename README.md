@@ -4,9 +4,9 @@
 
 O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a notas, múltiplos cartões por nota, repetição espaçada, estudo em vários dispositivos, mídia privada, busca semântica, interoperabilidade com Anki e integração futura com ferramentas MCP.
 
-Este repositório contém principalmente o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais e um validador local de sintaxe. Ele ainda não contém o frontend, o worker de processamento, o parser completo de `.apkg`, o serviço de embeddings ou o servidor MCP. Esses componentes serão implementados como serviços externos ou Edge Functions que usarão os contratos descritos aqui.
+Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, três Edge Functions de prioridade (`sync`, `fsrs-review` e `embeddings`) e validadores locais de sintaxe/documentação. O frontend, o parser completo de `.apkg`, o worker Anki, o materializador de templates e o servidor MCP continuam sendo componentes externos que usarão os contratos descritos aqui.
 
-> **Estado atual:** as migrações `0001` até `0014` estão versionadas e publicadas. O banco já define os contratos necessários para o produto, mas os workers de FSRS-6, embeddings, importação/exportação Anki e transporte MCP ainda precisam ser desenvolvidos e implantados fora do SQL.
+> **Estado atual:** as migrações `0001` até `0015` estão versionadas, e os fluxos de `sync`, revisão FSRS-6 e embeddings possuem implementações TypeScript para Supabase Edge Functions. Ainda precisam ser desenvolvidos o frontend, o worker de importação/exportação Anki, o materializador de templates e o transporte MCP.
 
 ## 1. Objetivos do sistema
 
@@ -22,9 +22,10 @@ A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Um
 | Supabase Auth | Identidade, JWT e `auth.uid()` usado nas policies | Projeto Supabase |
 | Supabase Storage | Arquivos de imagem, áudio, vídeo e outros anexos | Bucket privado `card-media` |
 | Cliente web/mobile | Interface, cache local, fila offline, renderização de templates e envio autenticado | Projeto futuro |
-| Worker FSRS-6 | Cálculo de agendamento e otimização individual dos pesos | Edge Function ou serviço assíncrono |
-| Worker de embeddings | Geração, atualização e reprocessamento dos vetores semânticos | Edge Function ou serviço assíncrono |
+| Worker FSRS-6 | Cálculo de agendamento e persistência idempotente de revisões | `supabase/functions/fsrs-review/` |
+| Worker de embeddings | Geração, atualização e reprocessamento dos vetores semânticos | `supabase/functions/embeddings/` |
 | Worker Anki | Leitura do ZIP, extração de `collection.anki2`, mídia e conversão de dados | Edge Function ou serviço assíncrono |
+| Sincronização | Entrega incremental de alterações e tombstones com cursor monotônico | `supabase/functions/sync/` |
 | Adaptador MCP | Transporte JSON-RPC, autenticação, validação de argumentos e exposição das ferramentas | Servidor MCP ou Edge Function |
 
 A separação é deliberada. O banco não deve abrir arquivos ZIP, executar JavaScript de templates, chamar um modelo de embeddings ou falar diretamente o protocolo MCP. Ele deve oferecer transações pequenas, determinísticas e auditáveis para que esses serviços façam seu trabalho sem duplicar regras de segurança.
@@ -71,6 +72,8 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0012_fsrs6_notes_embeddings.sql` | Migração | Separa notas e cartões, adiciona Cloze, FSRS-6 e pgvector. |
 | `0013_incremental_sync_usn_graves.sql` | Migração | Adiciona USN global, tombstones e sincronização incremental. |
 | `0014_interoperability_mcp.sql` | Migração | Adiciona provenance, jobs Anki, auditoria MCP e RPCs externas. |
+| `0015_hardening_workers_contracts.sql` | Migração | Adiciona idempotência de revisões, integridade SHA-256, índices compostos, sync com ownership e limpeza de mídia órfã. |
+| `supabase/functions/` | Edge Functions | Implementa `sync`, `fsrs-review` e `embeddings` em TypeScript/Deno. |
 | `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
 
 ## 5. Ordem de implantação e dependências
@@ -92,13 +95,14 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0012_fsrs6_notes_embeddings
   -> 0013_incremental_sync_usn_graves
   -> 0014_interoperability_mcp
+  -> 0015_hardening_workers_contracts
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
 
 ### 5.1 Procedimento recomendado
 
-Em desenvolvimento, crie um projeto Supabase separado. Faça backup ou snapshot antes de aplicar `0012`, `0013` ou `0014` em uma base com dados reais. Execute a validação local, aplique as migrações em ordem, faça uma sincronização completa de um dispositivo de teste e só depois habilite o cursor incremental.
+Em desenvolvimento, crie um projeto Supabase separado. Faça backup ou snapshot antes de aplicar `0012`, `0013`, `0014` ou `0015` em uma base com dados reais. Execute a validação local, aplique as migrações em ordem, faça uma sincronização completa de um dispositivo de teste e só depois habilite o cursor incremental.
 
 ```bash
 # Na raiz do repositório
@@ -158,7 +162,7 @@ Antes da migração `0012`, o modelo usava `note_group_id` em cartões como uma 
 
 `public.card_tags` é uma tabela de junção com chave primária composta `(card_id, tag_id)`. A relação é simples e evita duplicação de tags no JSON do cartão.
 
-`public.card_media` armazena apenas metadados e o ponteiro para o Storage. Os bytes não ficam no PostgreSQL. Os campos principais são `storage_path`, `media_type`, `mime_type`, tamanho e metadados JSONB. A migração `0012` acrescenta `md5_hash` e `storage_bucket`, permitindo verificar a integridade do arquivo no worker de upload ou importação.
+`public.card_media` armazena apenas metadados e o ponteiro para o Storage. Os bytes não ficam no PostgreSQL. Os campos principais são `storage_path`, `media_type`, `mime_type`, tamanho e metadados JSONB. A migração `0012` acrescenta `md5_hash` e `storage_bucket`; a migração `0015` acrescenta `sha256_hash`, permitindo verificar a integridade do arquivo no worker de upload ou importação sem confundir o algoritmo do digest.
 
 ## 11. Estado de estudo e histórico — `0006_learning_reviews.sql`
 
@@ -214,7 +218,7 @@ A view recursiva `v_deck_tree` entrega a hierarquia de decks para a interface. E
 
 A função `get_due_cards(p_deck_id, p_limit)` monta a fila de estudo. Ela considera cartões novos e cartões vencidos, limites de configuração global e limites diários já registrados em `daily_statistics`. A consulta usa o estado por usuário e o índice parcial de vencimento.
 
-A função legada `record_review()` recebe o resultado calculado pela aplicação e grava, em uma única operação, o log, o novo estado do cartão e os agregados diários. O agendamento não é calculado no SQL. Essa função continua útil para compatibilidade SM-2 ou fluxos anteriores, mas o novo fluxo FSRS-6 deve usar `record_review_fsrs6()`.
+A função legada `record_review()` recebe o resultado calculado pela aplicação e grava, em uma única operação, o log, o novo estado do cartão e os agregados diários. O agendamento não é calculado no SQL. Essa função continua útil para compatibilidade SM-2 ou fluxos anteriores. Para o fluxo FSRS-6, o cliente deve preferir a Edge Function `fsrs-review`, que usa `ts-fsrs` e chama `record_review_fsrs6_idempotent()` com uma chave estável por revisão.
 
 A função `get_current_streak()` percorre as estatísticas diárias para encontrar a sequência atual. A função `soft_delete_deck()` realiza o soft delete do deck, subdecks e cartões relacionados.
 
@@ -233,12 +237,12 @@ from public.get_due_cards(
 A migração cria o bucket privado `card-media`. O caminho precisa começar com o UUID do usuário:
 
 ```text
-card-media/{user_id}/{card_id}/{asset_id}.{extension}
+{user_id}/{card_id}/{asset_id}.{extension}
 ```
 
 As policies da tabela `storage.objects` permitem `SELECT`, `INSERT` e `DELETE` somente quando o bucket é `card-media` e a primeira pasta é igual a `auth.uid()`. A aplicação deve gerar o caminho no servidor ou validar o caminho antes do upload. Não use URLs públicas permanentes para essa mídia.
 
-A coluna `card_media.storage_path` deve conter o caminho relativo ao bucket. O worker pode salvar o hash MD5 em `md5_hash` depois de concluir o upload. Um hash diferente indica arquivo corrompido, reenvio incompleto ou colisão de referência e deve ser tratado como erro de integridade.
+A coluna `card_media.storage_path` deve conter o caminho relativo ao bucket. O worker deve salvar o digest SHA-256 em `sha256_hash` depois de concluir o upload; `md5_hash` permanece apenas como metadado legado da migração `0012`. Um digest diferente indica arquivo corrompido, reenvio incompleto ou colisão de referência e deve ser tratado como erro de integridade.
 
 ## 17. Notas, múltiplos cartões, Cloze, FSRS-6 e embeddings — `0012_fsrs6_notes_embeddings.sql`
 
@@ -267,10 +271,10 @@ A migração adiciona a versão do FSRS, retenção desejada, pesos, data da úl
 O fluxo normal é:
 
 ```text
-1. Cliente lê o estado atual do cartão.
-2. Worker FSRS-6 calcula o próximo estado.
-3. Cliente chama record_review_fsrs6().
-4. RPC bloqueia a linha do estado e valida ownership.
+1. A Edge Function `fsrs-review` lê o estado atual do cartão e as configurações do usuário.
+2. O worker calcula o próximo estado com `ts-fsrs` e o horário do servidor.
+3. A função chama `record_review_fsrs6_idempotent()` usando `client_review_id`.
+4. A RPC bloqueia a linha do estado, valida ownership e deduplica retries.
 5. RPC insere review_logs.
 6. RPC atualiza card_learning_state.
 7. RPC incrementa daily_statistics.
@@ -337,11 +341,11 @@ from public.search_notes_by_embedding(
 
 A sincronização usa um **USN global atribuído pelo servidor**. A sequence `sync_usn_seq` fornece valores monotônicos. As entidades sincronizáveis recebem uma coluna `usn` e triggers que atribuem um novo valor em insert ou update.
 
-As principais entidades cobertas são `decks`, `cards`, `notes`, `card_templates`, `tags`, `card_media`, `card_learning_state`, `review_logs`, `study_settings`, `user_deck_settings`, `daily_statistics`, `note_card_definitions`, `note_cloze_deletions`, `fsrs_optimization_runs` e `card_tags`.
+As principais entidades cobertas são `decks`, `cards`, `notes`, `card_templates`, `tags`, `card_media`, `card_learning_state`, `review_logs`, `study_settings`, `user_deck_settings`, `daily_statistics`, `note_card_definitions`, `note_cloze_deletions`, `fsrs_optimization_runs` e `card_tags`. A função `get_incremental_sync()` filtra as linhas ativas por ownership do usuário autenticado; a migração `0015` também garante que tombstones sejam entregues apenas ao respectivo proprietário.
 
 A tabela `graves` é o registro de exclusões. Ela guarda usuário, tipo da entidade, chave da entidade, USN, momento de exclusão e metadados. Para tabelas com chave composta, como `card_tags`, a chave é serializada de modo determinístico. Uma exclusão lógica também produz grave quando `deleted_at` muda de nulo para uma data.
 
-Os triggers `assign_sync_usn()` e `record_sync_grave()` são `SECURITY DEFINER`. Isso evita que um cliente forge o cursor. A função `get_incremental_sync(p_after_usn, p_limit)` devolve alterações ativas e tombstones posteriores ao cursor, ordenados por USN.
+Os triggers `assign_sync_usn()` e `record_sync_grave()` são `SECURITY DEFINER`. Isso evita que um cliente forge o cursor. A função `get_incremental_sync(p_after_usn, p_limit)` devolve alterações ativas e tombstones posteriores ao cursor, ordenados por USN. A Edge Function `sync` limita o payload, serializa o cursor como texto para evitar perda de precisão em clientes JavaScript e retorna `next_usn` e `has_more`.
 
 Exemplo:
 
@@ -368,7 +372,19 @@ Se uma etapa falhar, o cliente deve repetir o mesmo cursor. Upserts e exclusões
 
 O USN não é um mecanismo de resolução de todos os conflitos. Ele ordena alterações no servidor. Para edições de conteúdo concorrentes, o produto ainda precisa definir uma política, como last-write-wins por `updated_at`, revisão explícita ou merge por campo. Logs de revisão são eventos append-only e podem ser reenviados com UUID idempotente.
 
-## 19. Interoperabilidade Anki — primeira parte de `0014_interoperability_mcp.sql`
+## 19. Edge Functions implementadas
+
+A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo de execução das Edge Functions do Supabase [10]. As dependências são fixadas em `supabase/functions/deno.json`: `ts-fsrs@5.4.1` e `@supabase/supabase-js@2.112.4`.
+
+A função `sync` recebe `last_usn` e `limit`, chama a RPC invoker `get_incremental_sync()` e devolve um lote ordenado de registros ativos e tombstones. Ela não usa `service_role`; o JWT do usuário é encaminhado ao cliente Supabase para que RLS e `auth.uid()` permaneçam ativos. O cliente deve aplicar o lote localmente antes de gravar `next_usn`.
+
+A função `fsrs-review` recebe `card_id`, `rating`, `client_review_id` e o tempo de estudo. Ela usa a API `fsrs().next(card, now, rating)` documentada pelo projeto ts-fsrs [8], desabilita fuzzing para que o resultado seja reprodutível e persiste o resultado na RPC idempotente da migração `0015`. O `client_review_id` é obrigatório e deve ser reutilizado quando o dispositivo repetir uma operação offline.
+
+A função `embeddings` obtém a nota pelo usuário autenticado, transforma os campos textuais em uma entrada limitada, calcula SHA-256 do conteúdo e chama o endpoint oficial de embeddings. O modelo padrão é `text-embedding-3-small`, cuja integração no schema usa dimensão 1536 [9]. Antes do update, a função rejeita dimensões incorretas, valores não finitos e notas sem conteúdo textual. Se o mesmo hash e modelo já estiverem persistidos, o processamento é ignorado.
+
+Essas funções usam as URLs/chaves públicas do Supabase e uma chave secreta do provedor de embeddings como variáveis de ambiente. Nenhuma chave deve ser commitada, enviada ao frontend ou registrada nos logs.
+
+## 20. Interoperabilidade Anki — primeira parte de `0014_interoperability_mcp.sql`
 
 Um pacote `.apkg` representa um pacote de deck Anki. O manual oficial descreve que esses pacotes podem incluir decks, notas, tipos de nota e cartões [5]. O Flashi não abre o ZIP dentro de uma função PostgreSQL. Ele registra o trabalho em `anki_transfer_jobs` e deixa a extração para um worker.
 
@@ -381,7 +397,7 @@ queued -> processing -> completed
 
 Cada job possui usuário, direção (`import` ou `export`), hash SHA-256 do arquivo, referência no Storage, status, contadores, erro sanitizado, timestamps e metadados. O hash permite rejeitar ou reutilizar uma transferência idêntica.
 
-### 19.1 Importação
+### 20.1 Importação
 
 1. O cliente faz upload do `.apkg` para o bucket privado.
 2. A API calcula ou confirma `file_sha256`.
@@ -394,7 +410,7 @@ Cada job possui usuário, direção (`import` ou `export`), hash SHA-256 do arqu
 
 O worker deve tratar o arquivo como não confiável. Ele precisa impor limites de tamanho, quantidade de entradas, compressão, tempo de processamento e extensão de mídia. Nunca execute conteúdo importado como código.
 
-### 19.2 Exportação
+### 20.2 Exportação
 
 1. O cliente seleciona um deck ou conjunto de notas.
 2. A API cria um job `export`.
@@ -406,31 +422,31 @@ O worker deve tratar o arquivo como não confiável. Ele precisa impor limites d
 
 A exportação deve documentar a perda potencial de recursos que não possuem equivalente Anki. Templates avançados, estados de colaboração e embeddings podem exigir uma política de degradação ou metadados auxiliares.
 
-## 20. MCP — segunda parte de `0014_interoperability_mcp.sql`
+## 21. MCP — segunda parte de `0014_interoperability_mcp.sql`
 
 O Model Context Protocol separa host, cliente e servidor e usa uma camada de dados baseada em JSON-RPC, além de uma camada de transporte. O protocolo define primitives como tools, resources e prompts, mas não define como a aplicação de IA deve usar o contexto [6]. No Flashi, o banco implementa somente contratos de dados seguros; o transporte MCP fica no adaptador.
 
 A tabela `mcp_tool_audit` registra request id, usuário, nome da ferramenta, entrada sanitizada, resultado resumido, latência, status e timestamps. O log não deve armazenar tokens, segredos, conteúdo sensível desnecessário ou o texto integral de um prompt quando isso não for necessário para auditoria.
 
-### 20.1 `mcp_create_note()`
+### 21.1 `mcp_create_note()`
 
 A RPC cria uma nota e seus cartões em uma fronteira transacional. Ela valida o deck, cria a nota, materializa as definições enviadas e inicializa o estado de aprendizagem dos cartões gerados. Se `p_card_definitions` estiver vazio, a função cria um cartão Basic usando os campos `Front` e `Back` quando disponíveis.
 
 A assinatura lógica inclui deck, campos JSONB, template opcional, lista JSONB de definições, provenance e `request_id`. O resultado contém o UUID da nota e a lista de cartões criados. O `request_id` deve ser reutilizável para investigar retries no log de auditoria.
 
-### 20.2 `mcp_search_notes()`
+### 21.2 `mcp_search_notes()`
 
 A RPC recebe texto e, opcionalmente, um embedding. Quando há vetor, tenta busca semântica. Quando a busca vetorial não é possível ou não encontra resultado suficiente, usa uma estratégia lexical de fallback. A função respeita RLS, limita o número de resultados e registra a chamada em `mcp_tool_audit`.
 
 O adaptador MCP deve autenticar o usuário antes de chamar a RPC, validar o schema dos argumentos e nunca entregar `service_role` a um agente. O servidor MCP também deve limitar taxa, tamanho de entrada e número de resultados.
 
-### 20.3 `record_review_fsrs6()`
+### 21.3 `record_review_fsrs6()`
 
 A RPC é o contrato de escrita para revisões FSRS-6. Ela recebe o resultado calculado pelo worker e grava log, estado e estatística em uma única transação. A linha do estado é bloqueada durante a operação para evitar que dois retries concorrentes sobrescrevam o mesmo estado sem coordenação.
 
 O cálculo matemático fica fora da RPC para permitir atualização versionada do scheduler, testes determinísticos e execução assíncrona. A função persiste a versão e os dados suficientes para reproduzir ou auditar o resultado.
 
-## 21. Modelo de dados consolidado
+## 22. Modelo de dados consolidado
 
 | Tabela | Papel | Chave principal | Propriedade | Soft delete |
 |---|---|---|---|---|
@@ -455,7 +471,7 @@ O cálculo matemático fica fora da RPC para permitir atualização versionada d
 | `anki_transfer_jobs` | Jobs `.apkg` | `id` | Usuário | Não |
 | `mcp_tool_audit` | Auditoria de ferramentas | `id` | Usuário | Não |
 
-## 22. Índices principais
+## 23. Índices principais
 
 | Índice ou grupo | Objetivo |
 |---|---|
@@ -472,25 +488,25 @@ O cálculo matemático fica fora da RPC para permitir atualização versionada d
 
 Os índices não substituem medição. Depois de popular dados de produção, use `EXPLAIN (ANALYZE, BUFFERS)` nas filas de estudo, nas consultas de sync e na busca semântica. Ajuste `m`, `ef_construction`, `ef_search`, filtros e limites do HNSW somente com dados reais.
 
-## 23. Fluxos completos do produto
+## 24. Fluxos completos do produto
 
-### 23.1 Criar uma nota manualmente
+### 24.1 Criar uma nota manualmente
 
-O cliente autentica o usuário, valida os campos, escolhe um deck e envia a nota. A API grava `notes`, escolhe ou cria uma definição de cartão, cria `cards` e inicializa `card_learning_state`. Se houver mídia, o upload ocorre primeiro no bucket privado e a tabela `card_media` recebe apenas o ponteiro e o hash.
+O cliente autentica o usuário, valida os campos, escolhe um deck e envia a nota. A API grava `notes`, escolhe ou cria uma definição de cartão, cria `cards` e inicializa `card_learning_state`. Se houver mídia, o upload ocorre primeiro no bucket privado e a tabela `card_media` recebe apenas o ponteiro, o tamanho e o digest SHA-256.
 
-### 23.2 Estudar um cartão
+### 24.2 Estudar um cartão
 
-A API chama `get_due_cards()`. O cliente apresenta o cartão. O worker FSRS-6 calcula o próximo estado a partir do estado atual, rating e horário. A API chama `record_review_fsrs6()`. O banco grava o evento e atualiza o estado atomicamente. O cliente atualiza seu cache local apenas depois de receber sucesso.
+A API chama `get_due_cards()`. O cliente apresenta o cartão. A Edge Function `fsrs-review` calcula o próximo estado a partir do estado atual, rating e horário do servidor. Ela chama `record_review_fsrs6_idempotent()` com um UUID estável. O banco grava o evento e atualiza o estado atomicamente; o cliente atualiza seu cache local apenas depois de receber sucesso.
 
-### 23.3 Trabalhar offline
+### 24.3 Trabalhar offline
 
 O cliente mantém uma fila local de operações. Para cada evento de revisão, deve gerar um UUID estável. Quando voltar à rede, envia eventos em lotes. O servidor preserva logs válidos e o cliente usa `get_incremental_sync()` para receber alterações e graves. O cursor só avança após a persistência local do lote.
 
-### 23.4 Buscar conhecimento relacionado
+### 24.4 Buscar conhecimento relacionado
 
 O worker calcula o embedding da consulta usando o mesmo modelo e dimensão das notas. A API chama `search_notes_by_embedding()`. O filtro de ownership ocorre junto da consulta. A interface mostra nota, deck, score e cartão relacionado, mas não expõe o vetor cru ao usuário final.
 
-## 24. Segurança operacional
+## 25. Segurança operacional
 
 Nunca coloque tokens de Supabase, `service_role`, chaves de modelo ou credenciais MCP no README, no frontend ou em uma migration. O `service_role` ignora RLS e deve ser usado somente em workers confiáveis, com secrets gerenciados e logs sem dados sensíveis. A documentação de Storage confirma que chaves de serviço bypassam as policies e não podem ser distribuídas publicamente [2].
 
@@ -498,7 +514,7 @@ Toda RPC exposta pela API deve ter parâmetros limitados, validação de tipos e
 
 Arquivos `.apkg`, HTML de cartão, imagens, áudios e campos importados são dados não confiáveis. Não execute JavaScript de template, não extraia ZIP sem limites e não encaminhe texto importado diretamente para ferramentas com capacidade de escrita sem confirmação e autorização.
 
-## 25. Testes obrigatórios
+## 26. Testes obrigatórios
 
 A validação atual é sintática. `validate_sql.py` percorre os arquivos `00*.sql`, chama `pglast.parse_sql()`, imprime a quantidade de statements e retorna código de erro se algum arquivo não puder ser parseado.
 
@@ -510,7 +526,7 @@ A validação de homologação deve complementar o parser com os testes abaixo.
 
 | Grupo | Teste |
 |---|---|
-| Migração | Aplicar `0001`–`0014` em banco vazio e em clone da base existente. |
+| Migração | Aplicar `0001`–`0015` em banco vazio e em clone da base existente. |
 | Idempotência | Executar o conjunto duas vezes e confirmar ausência de mudanças destrutivas. |
 | Auth | Criar usuário e verificar `profiles` e `study_settings` automáticos. |
 | RLS | Tentar ler, inserir, alterar e apagar registros de outro usuário. |
@@ -519,25 +535,28 @@ A validação de homologação deve complementar o parser com os testes abaixo.
 | Auditoria | UPDATE/DELETE de `review_logs` deve falhar. |
 | FSRS | Revisão cria log, atualiza estado e incrementa estatística na mesma transação. |
 | Cloze | Uma nota com três omissões gera três cartões independentes. |
-| Embeddings | Modelo incorreto ou dimensão diferente deve ser rejeitado antes do insert. |
-| Sync | Soft delete gera grave e retry com o mesmo cursor é seguro. |
+| Embeddings | Modelo incorreto, dimensão diferente, conteúdo vazio ou valor não finito deve ser rejeitado antes do update. |
+| Sync | Soft delete gera grave, linhas de outro usuário não aparecem e retry com o mesmo cursor é seguro. |
+| Revisões offline | Dois requests com o mesmo `client_review_id` produzem uma única revisão e não duplicam estatísticas. |
+| Edge Functions | `sync`, `fsrs-review` e `embeddings` passam por type-check e rejeitam métodos/payloads inválidos. |
 | Anki | Hash repetido não cria job duplicado sem decisão explícita. |
 | MCP | Toda ferramenta exige autenticação, limita payload e grava auditoria. |
 | Storage | Upload fora de `{user_id}/...` deve falhar. |
 
-## 26. Lacunas e trabalho futuro
+## 27. Lacunas e trabalho futuro
 
-O schema está preparado para o produto, mas ainda não é o produto completo. Os próximos componentes necessários são um cliente web/mobile com cache offline, um worker real de FSRS-6, uma fila de jobs, o gerador de embeddings, o parser seguro de `.apkg`, o materializador de templates e o adaptador MCP.
+O schema e os três workers prioritários estão preparados, mas ainda não constituem o produto completo. Os próximos componentes necessários são um cliente web/mobile com cache offline, o worker de otimização FSRS, o parser seguro de `.apkg`, o materializador de templates e o adaptador MCP.
 
 Também será necessário decidir a estratégia de conflito para edições concorrentes de notas. O USN resolve ordenação e entrega, mas não faz merge semântico. A política mínima pode ser last-write-wins por `updated_at`; uma política mais robusta pode usar revisões por campo ou uma fila de conflitos.
 
 Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de `get_incremental_sync()`, taxa de falha do Storage, tempo dos jobs Anki, latência do HNSW, quantidade de jobs FSRS pendentes e taxa de retries de `record_review_fsrs6()`.
 
-## 27. Checklist de implantação
+## 28. Checklist de implantação
 
 | Etapa | Critério de aceite |
 |---|---|
-| Banco | Todas as migrações aplicadas na ordem, sem erro. |
+| Banco | Todas as migrações `0001`–`0015` aplicadas na ordem, sem erro. |
+| Edge Functions | Funções configuradas com variáveis de ambiente e type-check concluído. |
 | Auth | Usuário novo recebe perfil e configurações padrão. |
 | Segurança | RLS testado com pelo menos dois usuários e um papel não autenticado. |
 | Storage | Bucket privado criado e paths inválidos rejeitados. |
@@ -550,7 +569,7 @@ Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de 
 | Observabilidade | Erros e tempos de RPC/jobs possuem métricas sem conteúdo sensível. |
 | Recuperação | Backup, restore e replay de logs testados em homologação. |
 
-## 28. Referências técnicas
+## 29. Referências técnicas
 
 [1]: https://supabase.com/docs/guides/database/postgres/row-level-security "Supabase — Row Level Security"
 
@@ -566,6 +585,12 @@ Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de 
 
 [7]: https://github.com/pgvector/pgvector "pgvector — PostgreSQL vector similarity search"
 
-## 29. Licença e contribuição
+[8]: https://open-spaced-repetition.github.io/ts-fsrs/ "TS-FSRS — TypeScript FSRS scheduler"
+
+[9]: https://developers.openai.com/api/docs/models/text-embedding-3-small "OpenAI — text-embedding-3-small"
+
+[10]: https://supabase.com/docs/guides/functions/quickstart "Supabase — Edge Functions quickstart"
+
+## 30. Licença e contribuição
 
 Antes de definir uma licença pública, confirme a titularidade do código e das contribuições. Para contribuir, abra uma branch, altere as migrations de forma incremental, execute `python3 validate_sql.py`, teste em uma base Supabase descartável e descreva no pull request quais tabelas, policies, RPCs e contratos externos foram afetados.

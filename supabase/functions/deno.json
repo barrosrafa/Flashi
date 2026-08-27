@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true
+  },
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.112.4",
+    "ts-fsrs": "npm:ts-fsrs@5.4.1"
+  }
+}
