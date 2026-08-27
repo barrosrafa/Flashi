@@ -1,10 +1,15 @@
 {
-  "version": "4",
+  "version": "5",
   "specifiers": {
+    "npm:@sqlite.org/sqlite-wasm@3.53.0-build1": "3.53.0-build1",
     "npm:@supabase/supabase-js@2.112.4": "2.112.4",
-    "npm:ts-fsrs@5.4.1": "5.4.1"
+    "npm:fflate@0.8.3": "0.8.3",
+    "npm:fsrs-browser@6.6.0": "6.6.0"
   },
   "npm": {
+    "@sqlite.org/sqlite-wasm@3.53.0-build1": {
+      "integrity": "sha512-PfWPWN2n+/37doa8oh2/oUXk4OOsRYZsxc1W1sDXIGb/Pu5Yrb+f2eyYpgQMGITVX7HVgxhs9P18Rc6I97ym/g=="
+    },
     "@supabase/auth-js@2.112.4": {
       "integrity": "sha512-z8DesgwLzKM5PiT0yNmJU8VJyh1zAhYi+20Z7drdJQLXg/wWW4yGt/un+He5ERYUo94Vz66t5aeyr1DIDemI5A==",
       "dependencies": [
@@ -50,11 +55,14 @@
         "@supabase/storage-js"
       ]
     },
+    "fflate@0.8.3": {
+      "integrity": "sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA=="
+    },
+    "fsrs-browser@6.6.0": {
+      "integrity": "sha512-Q79mC7dZCku1zqpEnO041pxlAAYoldTtxYg8zg8SbmtKsbD5xOokaLdiJSv99aqDIplySsfJnrYn/yyQhE4KhA=="
+    },
     "iceberg-js@0.8.1": {
       "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA=="
-    },
-    "ts-fsrs@5.4.1": {
-      "integrity": "sha512-mOp9+oexJexBTkwjg/jQI1aSUQRLIAvbimeKHLSmVdNJPwObugFNKmZkoggH5d6kZ0uaWLboP1Al1DnXAfIb9w=="
     },
     "tslib@2.8.1": {
       "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="
@@ -62,7 +70,10 @@
   },
   "workspace": {
     "dependencies": [
+      "npm:@sqlite.org/sqlite-wasm@3.53.0-build1",
       "npm:@supabase/supabase-js@2.112.4",
+      "npm:fflate@0.8.3",
+      "npm:fsrs-browser@6.6.0",
       "npm:ts-fsrs@5.4.1"
     ]
   }

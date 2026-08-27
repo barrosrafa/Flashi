@@ -1,10 +1,14 @@
 {
   "compilerOptions": {
     "strict": true,
-    "noImplicitAny": true
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true
   },
   "imports": {
     "@supabase/supabase-js": "npm:@supabase/supabase-js@2.112.4",
+    "@sqlite.org/sqlite-wasm": "npm:@sqlite.org/sqlite-wasm@3.53.0-build1",
+    "fflate": "npm:fflate@0.8.3",
+    "fsrs-browser": "npm:fsrs-browser@6.6.0/fsrs_browser.js",
     "ts-fsrs": "npm:ts-fsrs@5.4.1"
   }
 }

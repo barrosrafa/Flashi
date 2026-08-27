@@ -105,9 +105,9 @@ export function handleError(error: unknown): Response {
   return jsonResponse({ error: "Internal server error" }, 500);
 }
 
-export function sha256Hex(value: string | ArrayBuffer): Promise<string> {
+export function sha256Hex(value: string | ArrayBuffer | Uint8Array): Promise<string> {
   const input = typeof value === "string" ? new TextEncoder().encode(value) : value;
-  return crypto.subtle.digest("SHA-256", input).then((digest) =>
+  return crypto.subtle.digest("SHA-256", input as BufferSource).then((digest) =>
     Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
   );
 }

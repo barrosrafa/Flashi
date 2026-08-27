@@ -29,8 +29,16 @@ Deno.serve(async (request) => {
     const sourceType = requireString(body.source_type ?? body.sourceType, "source_type", { maxLength: 32 });
     if (!ALLOWED_SOURCE_TYPES.has(sourceType)) throw new RequestError("Unsupported source_type", 400);
 
-    const content = typeof body.content === "string" ? body.content : undefined;
+    const content = typeof body.content === "string" ? body.content.trim() : undefined;
     const storagePath = typeof body.storage_path === "string" ? body.storage_path.trim() : undefined;
+    if (storagePath) {
+      if (!storagePath.startsWith(`${userId}/`) || storagePath.startsWith("/") || storagePath.includes("..")) {
+        throw new RequestError("storage_path must be under the authenticated user's directory", 400);
+      }
+      if (sourceType === "pdf_document" && !storagePath.toLowerCase().endsWith(".pdf")) {
+        throw new RequestError("PDF storage_path must end with .pdf", 400);
+      }
+    }
     const sourceReference = storagePath ?? content;
     if (!sourceReference) throw new RequestError("content or storage_path is required", 400);
     if (sourceType === "pdf_document" && content && new TextEncoder().encode(content).byteLength > MAX_PDF_BYTES) {

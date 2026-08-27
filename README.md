@@ -4,15 +4,13 @@
 
 O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a notas, múltiplos cartões por nota, repetição espaçada, estudo em vários dispositivos, mídia privada, busca semântica, interoperabilidade com Anki e integração futura com ferramentas MCP.
 
-Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, quatro Edge Functions de prioridade (`sync`, `fsrs-review`, `embeddings` e `ai-ingest`) e validadores locais de sintaxe/documentação. O frontend, o parser completo de `.apkg`, o worker Anki, o materializador de templates e o servidor MCP continuam sendo componentes externos que usarão os contratos descritos aqui.
+Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual:** as migrações `0001` até `0018` estão versionadas, e os fluxos de `sync`, revisão FSRS-6, embeddings e enfileiramento de ingestão por IA possuem implementações TypeScript para Supabase Edge Functions. Ainda precisam ser desenvolvidos o frontend, o worker de importação/exportação Anki, o materializador de templates e o processamento externo de PDF/YouTube/web do worker de ingestão.
->
-> **Nota de implantação:** o projeto Supabase remoto `flashi` já registra migrações chamadas `0018_search_optimizer_anki_contracts` e `0019_fsrs_scheduler`, que não existem nesta cópia do repositório. Por segurança, a migração local `0018_missing_features_extensions.sql` não deve ser aplicada nesse projeto até que a equipe renumere a migração para uma versão posterior ou alinhe o histórico. Ela foi mantida como `0018` porque esse é o contrato solicitado para uma base limpa ou exatamente migrada até `0017`.
+> **Estado atual:** as migrações `0001` até `0022` estão versionadas. `0018_search_optimizer_anki_contracts`, `0019_fsrs_scheduler`, `0020_move_pg_net_registration`, `0021_ai_ingestion_occlusion_references` e `0022_harden_image_occlusion_grant` já foram aplicadas no projeto Supabase `flashi`; o commit remoto de AI foi integrado sem reutilizar a numeração 0018 já aplicada. As funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer` e `ai-ingest` estão publicadas com JWT obrigatório. A busca semântica ainda depende de `OPENAI_API_KEY`; o worker FSRS exige um JWT com role `service_role` quando for acionado por cron; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado neste README.
 
 ## 1. Objetivos do sistema
 
-O banco precisa resolver quatro problemas diferentes sem misturar suas responsabilidades. O primeiro é armazenar conteúdo: decks, notas, cartões, templates, tags e mídia. O segundo é armazenar o histórico de estudo por usuário, sem transformar o conteúdo compartilhado em estado global. O terceiro é garantir sincronização confiável entre dispositivos, inclusive quando uma exclusão ocorrer offline. O quarto é oferecer contratos seguros para automações, busca semântica e interoperabilidade com Anki e MCP.
+O banco precisa resolver quatro problemas diferentes sem misturar suas responsabilidades. O primeiro é armazenar conteúdo: decks, notas, cartões, templates, tags e mídia. O segundo é armazenar o histórico de estudo por usuário, sem transformar o conteúdo compartilhado em estado global. O terceiro é garantir sincronização confiável entre dispositivos, inclusive quando uma exclusão ocorrer offline. O quarto é oferecer contratos seguros para automações, busca semântica, ingestão por IA, interoperabilidade com Anki e MCP.
 
 A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Uma nota representa o conteúdo original. Um cartão representa uma forma de estudar esse conteúdo. O estado FSRS ou SM-2 pertence ao par `(usuário, cartão)`, porque duas pessoas podem estudar o mesmo cartão com ritmos e históricos diferentes.
 
@@ -26,15 +24,18 @@ A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Um
 | Cliente web/mobile | Interface, cache local, fila offline, renderização de templates e envio autenticado | Projeto futuro |
 | Worker FSRS-6 | Cálculo de agendamento e persistência idempotente de revisões | `supabase/functions/fsrs-review/` |
 | Worker de embeddings | Geração, atualização e reprocessamento dos vetores semânticos | `supabase/functions/embeddings/` |
-| Worker Anki | Leitura do ZIP, extração de `collection.anki2`, mídia e conversão de dados | Edge Function ou serviço assíncrono |
+| Busca semântica | Embedding da consulta, filtros de ownership e chamada da RPC vetorial | `supabase/functions/semantic-search/` |
+| Otimizador FSRS | Enfileiramento autenticado, claim, cálculo WASM e persistência de pesos | `supabase/functions/fsrs-optimize/` e `fsrs-optimize-worker/` |
+| Worker Anki | Leitura/escrita ZIP, `collection.anki2`, modelos, tags e mídia | `supabase/functions/anki-transfer/` e `_shared/anki-apkg.ts` |
+| Ingestão AI | Validação de fonte e criação de jobs para processamento assíncrono | `supabase/functions/ai-ingest/` |
+| Oclusão de imagem | Caixas percentuais, cartões Cloze e estado de estudo | RPC `create_image_occlusion_note()` |
+| Referências entre notas | Links direcionados entre notas do mesmo usuário | tabela `note_references` |
 | Sincronização | Entrega incremental de alterações e tombstones com cursor monotônico | `supabase/functions/sync/` |
 | Adaptador MCP | Transporte JSON-RPC, autenticação, validação de argumentos e exposição das ferramentas | Servidor MCP ou Edge Function |
 
-A separação é deliberada. O banco não deve abrir arquivos ZIP, executar JavaScript de templates, chamar um modelo de embeddings ou falar diretamente o protocolo MCP. Ele deve oferecer transações pequenas, determinísticas e auditáveis para que esses serviços façam seu trabalho sem duplicar regras de segurança.
+A separação é deliberada. O banco não deve abrir arquivos ZIP, executar JavaScript de templates, chamar um modelo de embeddings, baixar PDF/YouTube/web ou falar diretamente o protocolo MCP. Ele deve oferecer transações pequenas, determinísticas e auditáveis para que esses serviços façam seu trabalho sem duplicar regras de segurança.
 
-A Edge Function `ai-ingest` valida o usuário, o deck, o tipo de fonte e o limite de entrada (PDF de até 15 MB), criando um registro `queued` em `public.ai_ingestion_jobs`. O worker assíncrono deve selecionar jobs nessa fila, baixar ou transcrever a fonte, chamar o provedor de LLM, materializar notas e cartões em uma transação e atualizar o job para `completed` ou `failed`. O repositório fornece a fila e o contrato de entrada; a extração de PDF/YouTube/web e as credenciais do provedor permanecem como responsabilidade do serviço worker, evitando acoplar binários e segredos ao banco.
-
-A RPC `public.create_image_occlusion_note(p_note_id, p_boxes)` exige que a nota pertença ao usuário autenticado, persiste cada caixa em `note_image_occlusion_boxes`, cria um cartão Cloze com `user_id`, `card_ordinal` e `cloze_ordinal` próprios por caixa e inicializa `card_learning_state`. A RPC retorna uma linha por caixa com `card_id` e `cloze_ordinal`; o cliente deve enviar coordenadas percentuais dentro do intervalo de 0 a 100.
+A Edge Function `ai-ingest` apenas autentica, valida a fonte e cria o job assíncrono. O worker de ingestão deve baixar ou processar o conteúdo, chamar o provedor de LLM com saída estruturada e materializar notas/cartões em uma transação. A RPC `create_image_occlusion_note()` materializa um cartão Cloze e seu estado de aprendizagem para cada caixa percentual pertencente a uma nota do usuário.
 
 ## 3. Arquitetura de alto nível
 
@@ -81,8 +82,14 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0015_hardening_workers_contracts.sql` | Migração | Adiciona idempotência de revisões, integridade SHA-256, índices compostos, sync com ownership e limpeza de mídia órfã. |
 | `0016_security_advisors_hardening.sql` | Migração | Corrige view SECURITY DEFINER, fixa search_path e remove execução pública de funções internas de trigger. |
 | `0017_fix_rls_recursion_and_fk_indexes.sql` | Migração | Isola consultas de ownership/colaboração para evitar recursão RLS e cobre FKs sem índice. |
-| `0018_missing_features_extensions.sql` | Migração | Adiciona fila de ingestão por IA, caixas de oclusão de imagem, referências cruzadas, RPC transacional de oclusão, USN/RLS e tombstones das novas entidades. |
-| `supabase/functions/` | Edge Functions | Implementa `sync`, `fsrs-review`, `embeddings` e `ai-ingest` em TypeScript/Deno. |
+| `0018_search_optimizer_anki_contracts.sql` | Migração | Cria bucket privado de transferências, contratos de jobs FSRS e RPC de criação de jobs `.apkg`. |
+| `0019_fsrs_scheduler.sql` | Migração | Habilita pg_cron/pg_net e define helper privado para agendar o worker com secret no Vault, sem armazenar JWT na migration. |
+| `0020_move_pg_net_registration.sql` | Migração | Recria pg_net no schema `extensions` após verificar fila vazia e ausência de dependências externas, eliminando o lint `extension_in_public`. |
+| `0021_ai_ingestion_occlusion_references.sql` | Migração | Adiciona fila de ingestão por IA, caixas de oclusão de imagem, referências cruzadas, RPC transacional de oclusão, USN/RLS e tombstones das novas entidades. |
+| `0022_harden_image_occlusion_grant.sql` | Migração | Remove EXECUTE público da RPC SECURITY DEFINER de oclusão, mantendo acesso para `authenticated`. |
+| `supabase/functions/` | Edge Functions | Implementa sincronização, revisão, embeddings, busca semântica, otimização FSRS, transferência Anki e enfileiramento AI em TypeScript/Deno. |
+| `tests/fsrs_smoke.ts` | Teste local | Exercita o `fsrs-browser` WASM e confirma retorno de 21 parâmetros. |
+| `tests/anki_roundtrip.ts` | Teste local | Exercita exportação/importação `.apkg`, tags, mídia e rejeição de zip-slip. |
 | `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
 
 ## 5. Ordem de implantação e dependências
@@ -107,7 +114,11 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0015_hardening_workers_contracts
   -> 0016_security_advisors_hardening
   -> 0017_fix_rls_recursion_and_fk_indexes
-  -> 0018_missing_features_extensions
+  -> 0018_search_optimizer_anki_contracts
+  -> 0019_fsrs_scheduler
+  -> 0020_move_pg_net_registration
+  -> 0021_ai_ingestion_occlusion_references
+  -> 0022_harden_image_occlusion_grant
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
@@ -386,53 +397,124 @@ O USN não é um mecanismo de resolução de todos os conflitos. Ele ordena alte
 
 ## 19. Edge Functions implementadas
 
-A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo de execução das Edge Functions do Supabase [10]. As dependências são fixadas em `supabase/functions/deno.json`: `ts-fsrs@5.4.1` e `@supabase/supabase-js@2.112.4`.
+A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo de execução das Edge Functions do Supabase [10]. O import map fixa `@supabase/supabase-js@2.112.4`, `ts-fsrs@5.4.1`, `fflate@0.8.3`, `@sqlite.org/sqlite-wasm@3.53.0-build1` e `fsrs-browser@6.6.0`. O type-check estrito deve ser executado antes de qualquer publicação.
 
-A função `sync` recebe `last_usn` e `limit`, chama a RPC invoker `get_incremental_sync()` e devolve um lote ordenado de registros ativos e tombstones. Ela não usa `service_role`; o JWT do usuário é encaminhado ao cliente Supabase para que RLS e `auth.uid()` permaneçam ativos. O cliente deve aplicar o lote localmente antes de gravar `next_usn`.
+| Função | Autorização | Entrada principal | Saída principal | Dependências críticas |
+|---|---|---|---|---|
+| `sync` | JWT de usuário | `last_usn`, `limit` | alterações, graves, `next_usn`, `has_more` | RPC `get_incremental_sync()` |
+| `fsrs-review` | JWT de usuário | `card_id`, `rating`, `client_review_id`, tempo | novo estado FSRS e confirmação idempotente | `ts-fsrs`, `record_review_fsrs6_idempotent()` |
+| `embeddings` | JWT de usuário | `note_id` | modelo, dimensão, hash e status | `OPENAI_API_KEY` |
+| `semantic-search` | JWT de usuário | `query`, `limit`, `mode`, `request_id` | resultados da RPC MCP e metadados do embedding | `OPENAI_API_KEY` para modo semântico |
+| `fsrs-optimize` | JWT de usuário | `mode=request` ou `mode=run`, `run_id` | job enfileirado ou pesos calculados | `fsrs-browser` WASM |
+| `fsrs-optimize-worker` | JWT válido com claim `role=service_role` | opcionalmente `run_id`, `limit` | lista de jobs processados | `SUPABASE_SERVICE_ROLE_KEY` e jobs 0018 |
+| `anki-transfer` | JWT de usuário | `action=import/export` e path ou deck | job concluído, contadores e path do `.apkg` | ZIP, SQLite WASM e Storage privado |
+| `ai-ingest` | JWT de usuário | `deck_id`, `source_type`, `content` ou `storage_path` | `job_id` em estado `queued` | fila `ai_ingestion_jobs` |
 
-A função `fsrs-review` recebe `card_id`, `rating`, `client_review_id` e o tempo de estudo. Ela usa a API `fsrs().next(card, now, rating)` documentada pelo projeto ts-fsrs [8], desabilita fuzzing para que o resultado seja reprodutível e persiste o resultado na RPC idempotente da migração `0015`. O `client_review_id` é obrigatório e deve ser reutilizado quando o dispositivo repetir uma operação offline.
+As funções de usuário usam `createUserClient(request)`: o JWT é encaminhado ao Supabase e o banco deriva `auth.uid()`, preservando RLS. Nenhuma função de usuário precisa de `service_role`. O worker FSRS usa credencial de serviço apenas no servidor e rejeita tokens com role diferente de `service_role`; manter `verify_jwt=true` impede chamadas sem JWT válido antes desse guard adicional.
 
-A função `embeddings` obtém a nota pelo usuário autenticado, transforma os campos textuais em uma entrada limitada, calcula SHA-256 do conteúdo e chama o endpoint oficial de embeddings. O modelo padrão é `text-embedding-3-small`, cuja integração no schema usa dimensão 1536 [9]. Antes do update, a função rejeita dimensões incorretas, valores não finitos e notas sem conteúdo textual. Se o mesmo hash e modelo já estiverem persistidos, o processamento é ignorado.
+### 19.1 Busca semântica completa
 
-Essas funções usam as URLs/chaves públicas do Supabase e uma chave secreta do provedor de embeddings como variáveis de ambiente. Nenhuma chave deve ser commitada, enviada ao frontend ou registrada nos logs.
+`semantic-search` aceita `mode: "semantic"` por padrão e `mode: "lexical"` como fallback explícito. No modo semântico, ele valida `query` com no máximo 8.000 caracteres, chama `POST https://api.openai.com/v1/embeddings` com `text-embedding-3-small`, exige exatamente 1.536 números finitos, calcula o hash SHA-256 da query e chama `mcp_search_notes()` com o vetor. O modo lexical não chama o provedor externo e é útil para disponibilidade degradada, testes e migrações.
 
-## 20. Interoperabilidade Anki — primeira parte de `0014_interoperability_mcp.sql`
-
-Um pacote `.apkg` representa um pacote de deck Anki. O manual oficial descreve que esses pacotes podem incluir decks, notas, tipos de nota e cartões [5]. O Flashi não abre o ZIP dentro de uma função PostgreSQL. Ele registra o trabalho em `anki_transfer_jobs` e deixa a extração para um worker.
-
-A tabela de jobs deve ser usada como máquina de estados. O fluxo esperado é:
-
-```text
-queued -> processing -> completed
-                         \-> failed
+```json
+{
+  "query": "funções de ordem superior em TypeScript",
+  "limit": 20,
+  "mode": "semantic",
+  "request_id": "search-uuid-estavel"
+}
 ```
 
-Cada job possui usuário, direção (`import` ou `export`), hash SHA-256 do arquivo, referência no Storage, status, contadores, erro sanitizado, timestamps e metadados. O hash permite rejeitar ou reutilizar uma transferência idêntica.
+A resposta contém `mode`, `model`, `dimensions`, `query_hash` e `results`. Os resultados respeitam os filtros da RPC e nunca expõem o vetor cru como parte do contrato de interface. A ausência de `OPENAI_API_KEY` produz erro de configuração (`503`) para o modo semântico; isso não é mascarado como busca lexical automática, porque ocultar a falha dificultaria a observabilidade.
 
-### 20.1 Importação
+### 19.2 Otimização FSRS personalizada
 
-1. O cliente faz upload do `.apkg` para o bucket privado.
-2. A API calcula ou confirma `file_sha256`.
-3. A API cria um job `queued`.
-4. O worker baixa o arquivo com credencial de serviço protegida.
-5. O worker extrai o ZIP e lê `collection.anki2` com uma biblioteca SQLite compatível.
-6. O worker converte decks, notas, tipos de nota, cartões, tags e mídia.
-7. O worker grava provenance em `notes.source_format`, `notes.external_id` e `notes.content_hash`.
-8. O worker atualiza contadores e status do job.
+`POST /functions/v1/fsrs-optimize` sem `mode` ou com `mode: "request"` chama `enqueue_fsrs_optimization()` e retorna `202` com `run_id`. O job só é criado se a RPC considerar o histórico elegível e não houver outra execução pendente. Para execução manual autenticada do próprio usuário, envie `mode: "run"` e o `run_id`; o endpoint faz claim, lê no máximo 25.000 logs FSRS, agrupa-os por cartão em ordem temporal, executa o `fsrs-browser` WASM e grava exatamente 21 pesos por meio de uma RPC transacional.
 
-O worker deve tratar o arquivo como não confiável. Ele precisa impor limites de tamanho, quantidade de entradas, compressão, tempo de processamento e extensão de mídia. Nunca execute conteúdo importado como código.
+```json
+{
+  "mode": "request"
+}
+```
 
-### 20.2 Exportação
+A execução periódica é feita pelo endpoint `fsrs-optimize-worker`. Ele consulta jobs `queued`, faz claim atômico via `claim_fsrs_optimization_job_for_worker()`, limita cada chamada a cinco jobs, atualiza `study_settings` somente após o cálculo bem-sucedido e marca falhas com mensagem truncada. O worker não aceita a chave pública `anon`: mesmo que o gateway aceite o JWT anônimo, o claim `role` é rejeitado.
 
-1. O cliente seleciona um deck ou conjunto de notas.
-2. A API cria um job `export`.
-3. O worker materializa `collection.anki2` em área temporária.
-4. O worker converte mídia para os nomes esperados pelo Anki.
-5. O worker cria o `.apkg`.
-6. O arquivo é salvo no Storage privado.
-7. O job termina com a referência de download e o hash.
+O pacote WASM foi validado no Deno local e no Edge Runtime remoto após corrigir a dependência de `self` usada por `wasm-bindgen-rayon`. O cálculo hoje grava `old_loss` e `new_loss` como nulos, pois a chamada implementada não coleta métrica de validação independente; o produto não deve exibir uma melhoria de loss como se tivesse sido medida. O conjunto mínimo operacional é de dois logs válidos, embora a qualidade estatística dependa de um histórico muito maior e representativo.
 
-A exportação deve documentar a perda potencial de recursos que não possuem equivalente Anki. Templates avançados, estados de colaboração e embeddings podem exigir uma política de degradação ou metadados auxiliares.
+### 19.3 Segredos e configuração
+
+Configure secrets somente no Dashboard/CLI seguro do Supabase. Os nomes usados por estas funções são:
+
+| Secret/configuração | Usado por | Obrigatório para | Nunca fazer |
+|---|---|---|---|
+| `SUPABASE_URL` | todas as funções | qualquer chamada autenticada | versionar em arquivo de produção |
+| `SUPABASE_ANON_KEY` | funções de usuário | `createUserClient()` | substituir por service role no frontend |
+| `SUPABASE_SERVICE_ROLE_KEY` | worker FSRS | execução de jobs periódicos | enviar ao cliente ou ao GitHub |
+| `OPENAI_API_KEY` | `embeddings`, `semantic-search` | geração de vetores | registrar em logs ou README |
+| `EMBEDDING_MODEL` | embeddings/busca | opcional; padrão `text-embedding-3-small` | usar modelo com dimensão diferente de 1.536 |
+
+As chaves públicas podem estar no cliente, mas a `service_role` e a chave do provedor de embeddings não. O repositório contém apenas nomes de variáveis e placeholders conceituais.
+
+## 20. Interoperabilidade Anki — migrações `0014` e `0018`
+
+Um pacote `.apkg` é tratado como um ZIP não confiável que contém uma coleção SQLite, modelos, notas, cartões e, opcionalmente, mídia. O manual do Anki confirma que o formato pode incluir decks, notas, tipos de nota, cartões e dados de agendamento [5]. O Flashi não executa ZIP ou SQL no PostgreSQL: a Edge Function `anki-transfer` faz a validação e a conversão em memória, enquanto o Storage mantém os binários em bucket privado.
+
+### 20.1 Máquina de estados e armazenamento
+
+A tabela `anki_transfer_jobs` registra `import` ou `export`, usuário, path, SHA-256, status, contadores, erro limitado, opções e timestamps. O fluxo esperado é `queued -> running -> completed` ou `queued -> running -> failed`. A função `create_anki_transfer_job()` valida que o path é do usuário autenticado e está sob `{user_id}/imports/` ou `{user_id}/exports/`, sempre com extensão `.apkg`.
+
+O bucket `anki-transfers` criado em `0018` é privado. As policies da tabela `storage.objects` permitem acesso somente quando a primeira pasta do path é o UUID do usuário. O cliente pode fazer upload de um arquivo para `user_id/imports/nome.apkg`; não pode usar o bucket para ler ou escrever o path de outro usuário. O arquivo processado nunca deve ser transformado em URL pública permanente.
+
+| Limite implementado | Valor | Comportamento |
+|---|---:|---|
+| Tamanho máximo do pacote | 50 MiB | rejeita com `413` antes do parse/import |
+| Entradas ZIP | 20.000 | rejeita paths/arquivos excessivos |
+| Notas importadas | 10.000 | rejeita acima do limite |
+| Mídias vinculadas por job | 2.000 | rejeita antes de continuar o upload |
+| Tamanho do request JSON | 2 MiB na função Anki | rejeita payload de controle excessivo |
+| IDs e nomes | UUIDs/strings limitadas | impede path traversal e nomes arbitrários |
+
+### 20.2 Importação
+
+O cliente primeiro envia o binário para `anki-transfers`, depois chama a função:
+
+```json
+{
+  "action": "import",
+  "storage_path": "<user_id>/imports/meu-deck.apkg",
+  "target_deck_name": "Anki importado"
+}
+```
+
+A função baixa o arquivo pelo path já validado, calcula o SHA-256 e usa `create_anki_transfer_job()`. Se o mesmo usuário já importou a combinação de direção e hash, o índice único permite retornar o job concluído em vez de criar uma segunda importação. Para arquivos novos, a função marca o job como `running`, lê a coleção SQLite e grava notas, definições, cartões e tags com provenance `source_format = 'anki_apkg'`, `external_id = 'anki:<nid>'` e `content_hash` calculado pelo Flashi.
+
+O parser aceita `collection.anki2` e `collection.anki21`. O formato binário `collection.anki21b` é rejeitado claramente porque não é convertido silenciosamente. O leitor reconstrói campos conforme os modelos e templates encontrados, processa condicionais básicas, `{{FrontSide}}`, referências de campos e Cloze simples, e cria uma definição por cartão encontrado. Quando um template não produz cartões, usa fallback Basic com os campos disponíveis.
+
+Tags são normalizadas para o usuário autenticado e vinculadas aos cartões importados. Mídia só é copiada quando seu nome aparece em algum campo da nota; cada arquivo recebe path isolado no bucket `card-media`, MIME derivado de extensão, tamanho e metadata com o nome original e a chave numérica do arquivo Anki. Não se executa JavaScript, CSS ou HTML importado como código do servidor; o frontend deve sanitizar/renderizar conteúdo conforme sua própria política.
+
+A resposta concluída inclui `job_id`, deck de destino, `total_notes`, `imported_notes`, `imported_cards`, `skipped_notes` e `uploaded_media`. Uma falha depois de algumas notas pode deixar conteúdo parcial, mas o job termina como `failed` e registra uma mensagem limitada; o produto pode oferecer limpeza/reprocessamento por job como etapa futura.
+
+### 20.3 Exportação
+
+Para exportar um deck, envie um UUID de deck pertencente ao usuário:
+
+```json
+{
+  "action": "export",
+  "deck_id": "00000000-0000-4000-8000-000000000000",
+  "include_media": true
+}
+```
+
+A função valida ownership, cria um job `export`, lê até 10.000 cartões ativos, copia tags relacionadas, baixa mídia quando `include_media` é verdadeiro e gera um ZIP com `fflate` e `collection.anki2` em SQLite WASM. O resultado é salvo em `<user_id>/exports/<job_id>.apkg`; a resposta inclui path, SHA-256, número de cartões e tamanho em bytes. Quando `include_media` é falso, nenhum byte de `card-media` é baixado ou inserido no pacote.
+
+O exportador atual cria deliberadamente um modelo Basic compatível, com campos `Front` e `Back`, uma nota por cartão, um deck derivado do deck Flashi, tags e o mapa `media`. Ele não preserva scheduling, intervalos, estados FSRS/SM-2, revlogs, múltiplos modelos originais, CSS avançado ou todos os metadados do Anki. A tabela `revlog` gerada não contém eventos de revisão. Portanto, esta é uma transferência de conteúdo e não uma promessa de round-trip completo com preservação de histórico. A paridade deve ser ampliada somente com fixtures reais do Anki e testes de importação no próprio Anki.
+
+### 20.4 Segurança e recuperação
+
+O parser rejeita paths absolutos, `../` e `..\\`, limita entradas, valida a existência da coleção e fecha a conexão SQLite em `finally`. O exportador sanitiza nomes de mídia, usa paths derivados de UUIDs conhecidos e impõe o mesmo limite de 50 MiB antes do upload. Nunca se deve aceitar um path fornecido pelo cliente fora do prefixo do próprio usuário, usar `upsert` em um path de outro job ou registrar o conteúdo do pacote nos logs.
+
+A fila pode ser reprocessada consultando jobs `failed` e removendo/reutilizando os arquivos sob o prefixo do usuário. Uma rotina de limpeza deve considerar retenção para exports antigos, jobs órfãos e arquivos de importação já processados. A criação do job é idempotente por hash, mas a criação de conteúdo importado é deliberadamente auditada por `external_id`; o operador deve testar o comportamento de duplicatas antes de habilitar reprocessamento automático.
 
 ## 21. MCP — segunda parte de `0014_interoperability_mcp.sql`
 
@@ -482,6 +564,25 @@ O cálculo matemático fica fora da RPC para permitir atualização versionada d
 | `graves` | Tombstones de sync | `id` | Usuário | Registro de exclusão |
 | `anki_transfer_jobs` | Jobs `.apkg` | `id` | Usuário | Não |
 | `mcp_tool_audit` | Auditoria de ferramentas | `id` | Usuário | Não |
+| `ai_ingestion_jobs` | Fila de ingestão por IA | `id` | Usuário/deck | Sim |
+| `note_image_occlusion_boxes` | Caixas de oclusão | `id` | Nota | Não |
+| `note_references` | Referências direcionadas entre notas | `id` | Nota de origem | Não |
+
+### 22.1 Ingestão por IA, oclusão e referências
+
+A função `ai-ingest` autentica o usuário, valida o deck pertencente a ele, aceita `source_type` entre `pdf_document`, `youtube_url`, `raw_text_block` e `web_page`, e cria um job `queued` em `ai_ingestion_jobs`. O endpoint não faz download, OCR, transcrição ou chamada de LLM; essas etapas ficam em worker assíncrono. O limite de entrada declarado para PDF é 15 MiB e `source_reference` é limitado a 2.000 caracteres.
+
+```json
+{
+  "deck_id": "00000000-0000-4000-8000-000000000000",
+  "source_type": "raw_text_block",
+  "content": "Texto de estudo a ser transformado em notas"
+}
+```
+
+O worker futuro deve fazer claim atômico, baixar somente paths pertencentes ao usuário, gerar saída estruturada, materializar notas e cartões em uma transação e finalizar o job como `completed` ou `failed`. O contrato está em `supabase/functions/ai-ingest/WORKER_CONTRACT.md`; credenciais de LLM, PDF/YouTube/web e processamento pesado não estão embutidos na Edge Function. Jobs presos em `processing` precisam de timeout/recovery administrativo antes de qualquer retry automático.
+
+A RPC `create_image_occlusion_note(p_note_id, p_boxes)` aceita caixas em percentuais dentro de 0 a 100, exige ownership da nota, persiste uma caixa por `cloze_ordinal`, cria um cartão Cloze e inicializa seu `card_learning_state`. Cada caixa retorna `card_id` e `cloze_ordinal`. A tabela `note_references` representa um link direcionado entre `source_note_id` e `target_note_id`, rejeita auto-referência e autoriza o acesso pela nota de origem. As três entidades novas possuem RLS e entram no sistema de USN/tombstones da migration 0021. A migration 0022 restringe a RPC SECURITY DEFINER de materialização ao papel `authenticated`, removendo EXECUTE público desnecessário.
 
 ## 23. Índices principais
 
@@ -516,7 +617,15 @@ O cliente mantém uma fila local de operações. Para cada evento de revisão, d
 
 ### 24.4 Buscar conhecimento relacionado
 
-O worker calcula o embedding da consulta usando o mesmo modelo e dimensão das notas. A API chama `search_notes_by_embedding()`. O filtro de ownership ocorre junto da consulta. A interface mostra nota, deck, score e cartão relacionado, mas não expõe o vetor cru ao usuário final.
+O cliente chama `semantic-search` com o JWT do usuário. No modo semântico, a função calcula o embedding da consulta com o mesmo modelo e dimensão das notas e chama `mcp_search_notes()`; no modo lexical, a consulta não depende do provedor externo. O filtro de ownership ocorre junto da RPC. A interface mostra nota, deck, score e cartão relacionado, mas não expõe o vetor cru ao usuário final.
+
+### 24.5 Otimizar parâmetros FSRS
+
+O cliente solicita um job com `fsrs-optimize` e acompanha `fsrs_optimization_runs`. Um cron seguro chama `fsrs-optimize-worker` com um JWT service role, o worker faz claim atômico e atualiza somente os pesos de usuários cujos dados foram processados. Se o worker falhar, o status é `failed` e o histórico continua disponível para nova tentativa controlada. O scheduler não deve ser implementado por polling no frontend.
+
+### 24.6 Transferir um pacote Anki
+
+O cliente faz upload para o bucket `anki-transfers` usando o prefixo próprio, chama `anki-transfer` e guarda `job_id`, status e SHA-256. A importação cria conteúdo com provenance Anki e a exportação produz um pacote Basic compatível com a limitação declarada na seção 20. O cliente não deve tentar interpretar o pacote como JSON nem assumir que estados de estudo e revlogs foram preservados.
 
 ## 25. Segurança operacional
 
@@ -528,17 +637,35 @@ Arquivos `.apkg`, HTML de cartão, imagens, áudios e campos importados são dad
 
 ## 26. Testes obrigatórios
 
-A validação atual é sintática. `validate_sql.py` percorre os arquivos `00*.sql`, chama `pglast.parse_sql()`, imprime a quantidade de statements e retorna código de erro se algum arquivo não puder ser parseado.
+A validação local combina parse PostgreSQL, contratos de texto, type-check Deno e fixtures de runtime. `validate_sql.py` percorre os arquivos `00*.sql`, chama `pglast.parse_sql()`, imprime a quantidade de statements e retorna código de erro se algum arquivo não puder ser parseado. O `test_contracts.py` garante que a migração 0018, os limites de segurança, as funções novas e os nomes de dependências permaneçam alinhados ao código.
 
 ```bash
 python3 validate_sql.py
+python3 validate_readme.py
+python3 -m unittest -v tests/test_contracts.py
+
+deno check --config supabase/functions/deno.json \
+  supabase/functions/semantic-search/index.ts \
+  supabase/functions/fsrs-optimize/index.ts \
+  supabase/functions/fsrs-optimize-worker/index.ts \
+  supabase/functions/anki-transfer/index.ts \
+  supabase/functions/_shared/anki-apkg.ts \
+  supabase/functions/_shared/fsrs-optimizer.ts
+
+deno run --config supabase/functions/deno.json \
+  --allow-read --allow-net tests/fsrs_smoke.ts
+deno run --config supabase/functions/deno.json \
+  --allow-read --allow-net tests/anki_roundtrip.ts
+git diff --check
 ```
 
-A validação de homologação deve complementar o parser com os testes abaixo.
+Os dois fixtures locais são importantes. `fsrs_smoke.ts` confirma que o WASM não depende de `self` ausente no runtime e que o optimizer retorna 21 parâmetros. `anki_roundtrip.ts` cria uma coleção Anki em memória, verifica notas, tags e mídia após exportar/importar e rejeita um path ZIP com `../`. Esses testes não substituem a importação de um pacote produzido por uma versão real do Anki.
+
+A validação de homologação deve complementar os testes locais com os casos abaixo.
 
 | Grupo | Teste |
 |---|---|
-| Migração | Aplicar `0001`–`0017` em banco vazio e em clone da base existente. |
+| Migração | Aplicar `0001`–`0018` em banco vazio e em clone da base existente. |
 | Idempotência | Executar o conjunto duas vezes e confirmar ausência de mudanças destrutivas. |
 | Auth | Criar usuário e verificar `profiles` e `study_settings` automáticos. |
 | RLS | Tentar ler, inserir, alterar e apagar registros de outro usuário e testar policies de decks compartilhados sem recursão. |
@@ -550,33 +677,39 @@ A validação de homologação deve complementar o parser com os testes abaixo.
 | Embeddings | Modelo incorreto, dimensão diferente, conteúdo vazio ou valor não finito deve ser rejeitado antes do update. |
 | Sync | Soft delete gera grave, linhas de outro usuário não aparecem e retry com o mesmo cursor é seguro. |
 | Revisões offline | Dois requests com o mesmo `client_review_id` produzem uma única revisão e não duplicam estatísticas. |
-| Edge Functions | `sync`, `fsrs-review` e `embeddings` passam por type-check e rejeitam métodos/payloads inválidos. |
-| Anki | Hash repetido não cria job duplicado sem decisão explícita. |
+| Edge Functions | As sete funções passam por type-check, exigem JWT e rejeitam métodos/payloads inválidos. |
+| Busca semântica | Query lexical funciona sem provedor; modo semântico rejeita dimensão/modelo inválidos e responde `503` sem secret. |
+| Otimização FSRS | Job queued é idempotente, claim é exclusivo, sucesso grava 21 pesos e falha não altera configurações. |
+| Anki | Hash repetido não cria job duplicado; `.anki2`/`.anki21`, tags, mídia, limite de 50 MiB e zip-slip são testados. |
 | MCP | Toda ferramenta exige autenticação, limita payload e grava auditoria. |
-| Storage | Upload fora de `{user_id}/...` deve falhar. |
+| Storage | Upload fora de `{user_id}/...` deve falhar; o bucket Anki deve permanecer privado. |
+| Advisors | Security advisor sem lints; avisos de performance são revisados separadamente e não são confundidos com falhas de segurança. |
 
-## 27. Lacunas e trabalho futuro
+## 27. Operação, lacunas e trabalho futuro
 
-O schema e os três workers prioritários estão preparados, mas ainda não constituem o produto completo. Os próximos componentes necessários são um cliente web/mobile com cache offline, o worker de otimização FSRS, o parser seguro de `.apkg`, o materializador de templates e o adaptador MCP.
+As três capacidades solicitadas agora possuem implementação publicada, mas isso não significa paridade total com Anki nem treinamento estatístico ideal em bases pequenas. A busca semântica depende de um provedor externo e de um modelo com 1.536 dimensões. A otimização FSRS está pronta para execução via worker, porém a medição de loss ainda não é calculada e o cron de produção exige configuração segura do JWT service role/Vault. A transferência Anki cobre o subconjunto documentado e não preserva scheduling ou revlogs.
+
+Para agendamento no Supabase, `0019` habilita `pg_cron` e `pg_net`, e `0020` move o registro de pg_net para `extensions` conforme a orientação operacional documentada [11] [12]. Mantenha a chave de serviço em Vault e, após configurá-la, execute `select private.configure_fsrs_optimizer_cron('<project-url>');`; o helper envia um POST para `/functions/v1/fsrs-optimize-worker` com `Authorization: Bearer <service_role_jwt>` sem guardar o JWT na migration. A migration 0020 só foi aplicada depois de verificar fila pg_net vazia e zero dependências externas; em outra base, faça backup/inventário ou use o procedimento assistido do Supabase. Não use um scheduler de frontend ou polling do agendador Manus para executar esse trabalho determinístico.
 
 Também será necessário decidir a estratégia de conflito para edições concorrentes de notas. O USN resolve ordenação e entrega, mas não faz merge semântico. A política mínima pode ser last-write-wins por `updated_at`; uma política mais robusta pode usar revisões por campo ou uma fila de conflitos.
 
-Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de `get_incremental_sync()`, taxa de falha do Storage, tempo dos jobs Anki, latência do HNSW, quantidade de jobs FSRS pendentes e taxa de retries de `record_review_fsrs6()`.
+Em produção, acompanhe tamanho de `review_logs`, duração de `get_incremental_sync()`, taxa de falha do Storage, tempo dos jobs Anki, quantidade de entradas e bytes rejeitados, latência do HNSW, quantidade de jobs FSRS pendentes, idade do job mais antigo, taxa de retries e custo/latência do provedor de embeddings. Exporte jobs `.apkg` antigos conforme uma política de retenção e nunca remova a única cópia de dados de estudo sem backup.
 
 ## 28. Checklist de implantação
 
 | Etapa | Critério de aceite |
 |---|---|
-| Banco | Todas as migrações `0001`–`0017` aplicadas na ordem, sem erro. |
-| Edge Functions | Funções configuradas com variáveis de ambiente e type-check concluído. |
+| Banco | Todas as migrações `0001`–`0022` aplicadas na ordem, sem erro; 0018–0022 aparecem no histórico remoto. |
+| Edge Functions | As oito funções estão `ACTIVE`, com `verify_jwt=true`, import map pinado e type-check concluído. |
 | Auth | Usuário novo recebe perfil e configurações padrão. |
 | Segurança | RLS testado com pelo menos dois usuários e um papel não autenticado. |
 | Storage | Bucket privado criado e paths inválidos rejeitados. |
 | Conteúdo | Nota, cartão Basic, Reverse e Cloze testados. |
 | Estudo | Fila, revisão, streak e estatísticas conferidos. |
-| FSRS | Worker calcula, RPC persiste e optimizer atualiza pesos somente após sucesso. |
+| FSRS | Revisão idempotente validada; optimizer local e worker remoto carregam WASM sem crash; cron só após configurar secret service role. |
 | Sync | Cliente aplica graves e só avança cursor após commit local. |
-| Anki | Importação e exportação usam job idempotente e storage privado. |
+| Busca semântica | Secret de embeddings configurado; consulta semântica e fallback lexical testados com usuário autenticado. |
+| Anki | Importação/exportação usam job idempotente, storage privado, limites e fixture round-trip; pacote real do Anki ainda deve ser homologado. |
 | MCP | Ferramentas expostas com auth, limites, auditoria e sem `service_role` no cliente. |
 | Observabilidade | Erros e tempos de RPC/jobs possuem métricas sem conteúdo sensível. |
 | Recuperação | Backup, restore e replay de logs testados em homologação. |
@@ -602,6 +735,16 @@ Em produção, o time deverá acompanhar tamanho de `review_logs`, duração de 
 [9]: https://developers.openai.com/api/docs/models/text-embedding-3-small "OpenAI — text-embedding-3-small"
 
 [10]: https://supabase.com/docs/guides/functions/quickstart "Supabase — Edge Functions quickstart"
+
+[11]: https://supabase.com/docs/guides/functions/schedule-functions "Supabase — Scheduling Edge Functions"
+
+[12]: https://supabase.com/docs/guides/database/extensions/pg_net "Supabase — pg_net: Async Networking"
+
+[13]: https://sqlite.org/wasm/doc/trunk/index.md "SQLite — WebAssembly documentation"
+
+[14]: https://github.com/101arrowz/fflate "fflate — Fast JavaScript compression library"
+
+[15]: https://github.com/open-spaced-repetition/fsrs-browser "Open Spaced Repetition — fsrs-browser"
 
 ## 30. Licença e contribuição
 

@@ -1,5 +1,5 @@
--- Flashi 0018: AI document ingestion jobs, image occlusion and note references.
--- This migration is additive and safe to rerun after 0017.
+-- Flashi 0021: AI document ingestion jobs, image occlusion and note references.
+-- This migration is additive and safe to rerun after 0020.
 
 -- ---------------------------------------------------------------------------
 -- Shared enums.
@@ -110,17 +110,32 @@ create policy note_image_occlusion_boxes_owner_delete on public.note_image_occlu
 alter table public.note_references enable row level security;
 drop policy if exists note_references_source_owner_select on public.note_references;
 create policy note_references_source_owner_select on public.note_references
-  for select using (exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid()));
+  for select using (
+    exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid())
+    and exists (select 1 from public.notes n where n.id = target_note_id and n.user_id = auth.uid())
+  );
 drop policy if exists note_references_source_owner_insert on public.note_references;
 create policy note_references_source_owner_insert on public.note_references
-  for insert with check (exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid()));
+  for insert with check (
+    exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid())
+    and exists (select 1 from public.notes n where n.id = target_note_id and n.user_id = auth.uid())
+  );
 drop policy if exists note_references_source_owner_update on public.note_references;
 create policy note_references_source_owner_update on public.note_references
-  for update using (exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid()))
-  with check (exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid()));
+  for update using (
+    exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid())
+    and exists (select 1 from public.notes n where n.id = target_note_id and n.user_id = auth.uid())
+  )
+  with check (
+    exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid())
+    and exists (select 1 from public.notes n where n.id = target_note_id and n.user_id = auth.uid())
+  );
 drop policy if exists note_references_source_owner_delete on public.note_references;
 create policy note_references_source_owner_delete on public.note_references
-  for delete using (exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid()));
+  for delete using (
+    exists (select 1 from public.notes n where n.id = source_note_id and n.user_id = auth.uid())
+    and exists (select 1 from public.notes n where n.id = target_note_id and n.user_id = auth.uid())
+  );
 
 -- ---------------------------------------------------------------------------
 -- USN and tombstones for the new entities.
@@ -271,7 +286,7 @@ grant execute on function public.create_image_occlusion_note(uuid, jsonb) to aut
 create or replace function public.get_incremental_sync(p_after_usn bigint default 0, p_limit integer default 500)
 returns table (entity_type text, entity_key text, usn bigint, is_deleted boolean, payload jsonb)
 language sql security invoker stable as $$
-  with changes as (
+  with changes (entity_type, entity_key, usn, is_deleted, payload) as (
     select 'deck'::text, d.id::text, d.usn, false, to_jsonb(d) from public.decks d where d.deleted_at is null and d.usn > p_after_usn
     union all select 'note', n.id::text, n.usn, false, to_jsonb(n) from public.notes n where n.deleted_at is null and n.usn > p_after_usn
     union all select 'card', c.id::text, c.usn, false, to_jsonb(c) from public.cards c where c.deleted_at is null and c.usn > p_after_usn

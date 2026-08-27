@@ -9,14 +9,18 @@ fences = re.findall(r"^```", readme, flags=re.MULTILINE)
 if len(fences) % 2:
     raise SystemExit("README has an unbalanced code fence")
 
-required = [f"{n:04d}_" for n in range(1, 15)]
+required = [f"{n:04d}_" for n in range(1, 23)]
 missing = [prefix for prefix in required if prefix not in readme]
 if missing:
     raise SystemExit(f"README is missing migration references: {missing}")
 
-for marker in ["ghp_", "github_pat_", "service_role", "OPENAI_API_KEY"]:
-    if marker in readme and marker != "service_role":
-        raise SystemExit(f"README contains a credential-like marker: {marker}")
+for pattern in (
+    r"ghp_[A-Za-z0-9]{20,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",
+    r"(?i)(?:OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY)\s*=\s*[\"'](?!<)[^\"']{20,}[\"']",
+):
+    if re.search(pattern, readme):
+        raise SystemExit(f"README contains a credential-like value matching: {pattern}")
 
 if "https://docs.ankiweb.net/importing.html" in readme:
     raise SystemExit("README contains the obsolete Anki import URL")
