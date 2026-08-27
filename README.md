@@ -88,6 +88,7 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0021_ai_ingestion_occlusion_references.sql` | Migração | Adiciona fila de ingestão por IA, caixas de oclusão de imagem, referências cruzadas, RPC transacional de oclusão, USN/RLS e tombstones das novas entidades. |
 | `0022_harden_image_occlusion_grant.sql` | Migração | Remove EXECUTE público da RPC SECURITY DEFINER de oclusão, mantendo acesso para `authenticated`. |
 | `0023_security_definer_cleanup.sql` | Migração | Torna explícito o `search_path` do sync e troca a RPC de oclusão para `SECURITY INVOKER`, removendo lints evitáveis. |
+| `0024_gamification_exams_socratic.sql` | Migração | Adiciona XP/níveis/badges, exames com priorização recursiva, remediação socrática de leeches, RLS, USN/graves e RPCs autenticadas. |
 | `supabase/functions/` | Edge Functions | Implementa sincronização, revisão, embeddings, busca semântica, otimização FSRS, transferência Anki e enfileiramento AI em TypeScript/Deno. |
 | `tests/fsrs_smoke.ts` | Teste local | Exercita o `fsrs-browser` WASM e confirma retorno de 21 parâmetros. |
 | `tests/anki_roundtrip.ts` | Teste local | Exercita exportação/importação `.apkg`, tags, mídia e rejeição de zip-slip. |
@@ -119,8 +120,10 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0019_fsrs_scheduler
   -> 0020_move_pg_net_registration
   -> 0021_ai_ingestion_occlusion_references
-  -> 0022_harden_image_occlusion_grant
-  -> 0023_security_definer_cleanup
+      -> 0022_harden_image_occlusion_grant
+      -> 0023_security_definer_cleanup
+      -> 0024_gamification_exams_socratic
+
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
@@ -397,7 +400,13 @@ Se uma etapa falhar, o cliente deve repetir o mesmo cursor. Upserts e exclusões
 
 O USN não é um mecanismo de resolução de todos os conflitos. Ele ordena alterações no servidor. Para edições de conteúdo concorrentes, o produto ainda precisa definir uma política, como last-write-wins por `updated_at`, revisão explícita ou merge por campo. Logs de revisão são eventos append-only e podem ser reenviados com UUID idempotente.
 
-## 19. Edge Functions implementadas
+## 19. Gamificação, exames e remediação socrática — `0024_gamification_exams_socratic.sql`
+
+A migração `0024_gamification_exams_socratic.sql` implementa apenas as três lacunas reais solicitadas. A gamificação separa o perfil de XP (`user_gamification_profiles`), o catálogo (`badges_definition`) e os desbloqueios (`user_badges`), com a RPC transacional `add_user_xp(uuid, integer)` e fórmula de nível documentada na API. O agendador usa `deck_exams`, aceita os quatro valores de `exam_priority_level`, percorre subdecks com `WITH RECURSIVE` e expõe `get_due_cards_with_exam_schedule(uuid, integer)`, preservando as cotas de `study_settings` e `daily_statistics` de `get_due_cards`. A remediação socrática cria `socratic_remediation_sessions` quando o cartão cruza `lapses >= 4`, marca `is_suspended = true` sem inventar um valor `suspended` em `card_state`, e conclui o fluxo com `resolve_socratic_remediation(uuid)`.
+
+As cinco tabelas novas têm RLS habilitado. O catálogo de badges permite leitura pública; todas as relações de usuário são ownership-scoped. As tabelas sincronizáveis recebem USN e triggers de tombstone, e `get_incremental_sync()` inclui `user_gamification_profile`, `user_badge`, `deck_exam` e `socratic_remediation_session`. O contrato completo, com exemplos `supabase-js`, REST, payloads, erros e diagnóstico, está em [`docs/SUPABASE_API.md`](docs/SUPABASE_API.md).
+
+## 20. Edge Functions implementadas
 
 A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo de execução das Edge Functions do Supabase [10]. O import map fixa `@supabase/supabase-js@2.112.4`, `ts-fsrs@5.4.1`, `fflate@0.8.3`, `@sqlite.org/sqlite-wasm@3.53.0-build1` e `fsrs-browser@6.6.0`. O type-check estrito deve ser executado antes de qualquer publicação.
 

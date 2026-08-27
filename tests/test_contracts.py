@@ -83,6 +83,43 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, security_cleanup_migration)
 
+    def test_0024_gamification_exam_socratic_contracts(self):
+        migration = (ROOT / "0024_gamification_exams_socratic.sql").read_text(encoding="utf-8")
+        api_doc = (ROOT / "docs/SUPABASE_API.md").read_text(encoding="utf-8")
+        for fragment in (
+            "exam_priority_level",
+            "user_gamification_profiles",
+            "badges_definition",
+            "user_badges",
+            "add_user_xp",
+            "deck_exams",
+            "get_due_cards_with_exam_schedule",
+            "with recursive",
+            "socratic_remediation_sessions",
+            "check_card_leech_for_socratic",
+            "new.is_suspended := true",
+            "resolve_socratic_remediation",
+            "graves_entity_type_check",
+            "user_gamification_profile",
+            "user_badge",
+            "deck_exam",
+            "socratic_remediation_session",
+            "revoke execute on function public.add_user_xp(uuid, integer) from public, anon",
+            "grant execute on function public.resolve_socratic_remediation(uuid) to authenticated",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, migration)
+        for fragment in (
+            "POST /rest/v1/rpc/add_user_xp",
+            "POST /rest/v1/rpc/get_due_cards_with_exam_schedule",
+            "POST /rest/v1/rpc/resolve_socratic_remediation",
+            "POST /rest/v1/rpc/get_incremental_sync",
+            "scheduling_factor",
+            "auth.uid()",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, api_doc)
+
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")
         fsrs = (ROOT / "supabase/functions/fsrs-review/index.ts").read_text(encoding="utf-8")
