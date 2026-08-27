@@ -4,9 +4,11 @@
 
 O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a notas, múltiplos cartões por nota, repetição espaçada, estudo em vários dispositivos, mídia privada, busca semântica, interoperabilidade com Anki e integração futura com ferramentas MCP.
 
-Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, três Edge Functions de prioridade (`sync`, `fsrs-review` e `embeddings`) e validadores locais de sintaxe/documentação. O frontend, o parser completo de `.apkg`, o worker Anki, o materializador de templates e o servidor MCP continuam sendo componentes externos que usarão os contratos descritos aqui.
+Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, quatro Edge Functions de prioridade (`sync`, `fsrs-review`, `embeddings` e `ai-ingest`) e validadores locais de sintaxe/documentação. O frontend, o parser completo de `.apkg`, o worker Anki, o materializador de templates e o servidor MCP continuam sendo componentes externos que usarão os contratos descritos aqui.
 
-> **Estado atual:** as migrações `0001` até `0015` estão versionadas, e os fluxos de `sync`, revisão FSRS-6 e embeddings possuem implementações TypeScript para Supabase Edge Functions. Ainda precisam ser desenvolvidos o frontend, o worker de importação/exportação Anki, o materializador de templates e o transporte MCP.
+> **Estado atual:** as migrações `0001` até `0018` estão versionadas, e os fluxos de `sync`, revisão FSRS-6, embeddings e enfileiramento de ingestão por IA possuem implementações TypeScript para Supabase Edge Functions. Ainda precisam ser desenvolvidos o frontend, o worker de importação/exportação Anki, o materializador de templates e o processamento externo de PDF/YouTube/web do worker de ingestão.
+>
+> **Nota de implantação:** o projeto Supabase remoto `flashi` já registra migrações chamadas `0018_search_optimizer_anki_contracts` e `0019_fsrs_scheduler`, que não existem nesta cópia do repositório. Por segurança, a migração local `0018_missing_features_extensions.sql` não deve ser aplicada nesse projeto até que a equipe renumere a migração para uma versão posterior ou alinhe o histórico. Ela foi mantida como `0018` porque esse é o contrato solicitado para uma base limpa ou exatamente migrada até `0017`.
 
 ## 1. Objetivos do sistema
 
@@ -29,6 +31,10 @@ A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Um
 | Adaptador MCP | Transporte JSON-RPC, autenticação, validação de argumentos e exposição das ferramentas | Servidor MCP ou Edge Function |
 
 A separação é deliberada. O banco não deve abrir arquivos ZIP, executar JavaScript de templates, chamar um modelo de embeddings ou falar diretamente o protocolo MCP. Ele deve oferecer transações pequenas, determinísticas e auditáveis para que esses serviços façam seu trabalho sem duplicar regras de segurança.
+
+A Edge Function `ai-ingest` valida o usuário, o deck, o tipo de fonte e o limite de entrada (PDF de até 15 MB), criando um registro `queued` em `public.ai_ingestion_jobs`. O worker assíncrono deve selecionar jobs nessa fila, baixar ou transcrever a fonte, chamar o provedor de LLM, materializar notas e cartões em uma transação e atualizar o job para `completed` ou `failed`. O repositório fornece a fila e o contrato de entrada; a extração de PDF/YouTube/web e as credenciais do provedor permanecem como responsabilidade do serviço worker, evitando acoplar binários e segredos ao banco.
+
+A RPC `public.create_image_occlusion_note(p_note_id, p_boxes)` exige que a nota pertença ao usuário autenticado, persiste cada caixa em `note_image_occlusion_boxes`, cria um cartão Cloze com `user_id`, `card_ordinal` e `cloze_ordinal` próprios por caixa e inicializa `card_learning_state`. A RPC retorna uma linha por caixa com `card_id` e `cloze_ordinal`; o cliente deve enviar coordenadas percentuais dentro do intervalo de 0 a 100.
 
 ## 3. Arquitetura de alto nível
 
@@ -75,7 +81,8 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0015_hardening_workers_contracts.sql` | Migração | Adiciona idempotência de revisões, integridade SHA-256, índices compostos, sync com ownership e limpeza de mídia órfã. |
 | `0016_security_advisors_hardening.sql` | Migração | Corrige view SECURITY DEFINER, fixa search_path e remove execução pública de funções internas de trigger. |
 | `0017_fix_rls_recursion_and_fk_indexes.sql` | Migração | Isola consultas de ownership/colaboração para evitar recursão RLS e cobre FKs sem índice. |
-| `supabase/functions/` | Edge Functions | Implementa `sync`, `fsrs-review` e `embeddings` em TypeScript/Deno. |
+| `0018_missing_features_extensions.sql` | Migração | Adiciona fila de ingestão por IA, caixas de oclusão de imagem, referências cruzadas, RPC transacional de oclusão, USN/RLS e tombstones das novas entidades. |
+| `supabase/functions/` | Edge Functions | Implementa `sync`, `fsrs-review`, `embeddings` e `ai-ingest` em TypeScript/Deno. |
 | `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
 
 ## 5. Ordem de implantação e dependências
@@ -100,6 +107,7 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0015_hardening_workers_contracts
   -> 0016_security_advisors_hardening
   -> 0017_fix_rls_recursion_and_fk_indexes
+  -> 0018_missing_features_extensions
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.

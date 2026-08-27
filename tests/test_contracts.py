@@ -57,6 +57,29 @@ class FlashiContractsTest(unittest.TestCase):
         self.assertIn("sha256Hex(text)", embeddings)
         self.assertIn("embedding.length !== DIMENSIONS", embeddings)
 
+    def test_missing_features_contracts_are_present(self):
+        migration = (ROOT / "0018_missing_features_extensions.sql").read_text(encoding="utf-8")
+        ingest = (ROOT / "supabase/functions/ai-ingest/index.ts").read_text(encoding="utf-8")
+        worker_contract = (ROOT / "supabase/functions/ai-ingest/WORKER_CONTRACT.md").read_text(encoding="utf-8")
+        for fragment in (
+            "generation_source_type",
+            "job_status_type",
+            "ai_ingestion_jobs",
+            "note_image_occlusion_boxes",
+            "note_references",
+            "create_image_occlusion_note",
+            "cards(user_id",
+            "card_learning_state(user_id, card_id, state)",
+            "note_image_occlusion_box",
+            "note_reference",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, migration)
+        for fragment in ("MAX_PDF_BYTES", "ai_ingestion_jobs", 'status: "queued"', "requireUserId"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, ingest)
+        self.assertIn("15 MiB", worker_contract)
+
     def test_no_credential_markers_are_tracked(self):
         candidates = list(ROOT.glob("*.sql")) + list(ROOT.glob("*.py"))
         candidates += list(ROOT.glob("supabase/functions/**/*.ts"))
