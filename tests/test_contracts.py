@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class FlashiContractsTest(unittest.TestCase):
     def test_all_migrations_parse(self):
         migrations = sorted(ROOT.glob("00*.sql"))
-        self.assertGreaterEqual(len(migrations), 22)
+        self.assertGreaterEqual(len(migrations), 23)
         for migration in migrations:
             with self.subTest(migration=migration.name):
                 statements = parse_sql(migration.read_text(encoding="utf-8"))
@@ -25,6 +25,7 @@ class FlashiContractsTest(unittest.TestCase):
         scheduler_migration = (ROOT / "0019_fsrs_scheduler.sql").read_text(encoding="utf-8")
         pg_net_migration = (ROOT / "0020_move_pg_net_registration.sql").read_text(encoding="utf-8")
         image_occlusion_grant_migration = (ROOT / "0022_harden_image_occlusion_grant.sql").read_text(encoding="utf-8")
+        security_cleanup_migration = (ROOT / "0023_security_definer_cleanup.sql").read_text(encoding="utf-8")
         required_fragments = (
             "review_logs_user_client_review_id",
             "record_review_fsrs6_idempotent",
@@ -73,6 +74,14 @@ class FlashiContractsTest(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, image_occlusion_grant_migration)
+        for fragment in (
+            "alter function public.get_incremental_sync(bigint, integer)",
+            "set search_path = public",
+            "alter function public.create_image_occlusion_note(uuid, jsonb)",
+            "security invoker",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, security_cleanup_migration)
 
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")
@@ -142,7 +151,7 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, ingest)
         self.assertIn("15 MiB", worker_contract)
-        self.assertIn("migration 0021", worker_contract)
+        self.assertIn("migração 0021", worker_contract)
 
     def test_no_credential_markers_are_tracked(self):
         candidates = list(ROOT.glob("*.sql")) + list(ROOT.glob("*.py"))

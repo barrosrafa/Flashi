@@ -9,7 +9,7 @@ fences = re.findall(r"^```", readme, flags=re.MULTILINE)
 if len(fences) % 2:
     raise SystemExit("README has an unbalanced code fence")
 
-required = [f"{n:04d}_" for n in range(1, 23)]
+required = [f"{n:04d}_" for n in range(1, 24)]
 missing = [prefix for prefix in required if prefix not in readme]
 if missing:
     raise SystemExit(f"README is missing migration references: {missing}")

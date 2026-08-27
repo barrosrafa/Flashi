@@ -124,7 +124,7 @@ A exportação atual é de conteúdo, não de histórico completo. Ela cria um m
 
 ## Deploy
 
-Aplique as migrações `0001`–`0022` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021_ai_ingestion_occlusion_references` cria a fila AI, oclusão, referências e tombstones; `0022_harden_image_occlusion_grant` remove EXECUTE público da RPC de oclusão.
+Aplique as migrações `0001`–`0023` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021_ai_ingestion_occlusion_references` cria a fila AI, oclusão, referências e tombstones; `0022_harden_image_occlusion_grant` remove EXECUTE público da RPC de oclusão; `0023_security_definer_cleanup` fixa o `search_path` do sync e torna a RPC de oclusão `SECURITY INVOKER`.
 
 Com Supabase CLI:
 

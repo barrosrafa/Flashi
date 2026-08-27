@@ -6,7 +6,7 @@ O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a 
 
 Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual:** as migrações `0001` até `0022` estão versionadas. `0018_search_optimizer_anki_contracts`, `0019_fsrs_scheduler`, `0020_move_pg_net_registration`, `0021_ai_ingestion_occlusion_references` e `0022_harden_image_occlusion_grant` já foram aplicadas no projeto Supabase `flashi`; o commit remoto de AI foi integrado sem reutilizar a numeração 0018 já aplicada. As funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer` e `ai-ingest` estão publicadas com JWT obrigatório. A busca semântica ainda depende de `OPENAI_API_KEY`; o worker FSRS exige um JWT com role `service_role` quando for acionado por cron; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado neste README.
+> **Estado atual:** as migrações `0001` até `0023` estão versionadas. `0018_search_optimizer_anki_contracts`, `0019_fsrs_scheduler`, `0020_move_pg_net_registration`, `0021_ai_ingestion_occlusion_references`, `0022_harden_image_occlusion_grant` e `0023_security_definer_cleanup` já foram aplicadas no projeto Supabase `flashi`; o commit remoto de AI foi integrado sem reutilizar a numeração 0018 já aplicada. As funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer` e `ai-ingest` estão publicadas com JWT obrigatório. A busca semântica ainda depende de `OPENAI_API_KEY`; o worker FSRS exige um JWT com role `service_role` quando for acionado por cron; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado neste README. O advisor de segurança remoto retorna zero lints após 0023.
 
 ## 1. Objetivos do sistema
 
@@ -87,6 +87,7 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0020_move_pg_net_registration.sql` | Migração | Recria pg_net no schema `extensions` após verificar fila vazia e ausência de dependências externas, eliminando o lint `extension_in_public`. |
 | `0021_ai_ingestion_occlusion_references.sql` | Migração | Adiciona fila de ingestão por IA, caixas de oclusão de imagem, referências cruzadas, RPC transacional de oclusão, USN/RLS e tombstones das novas entidades. |
 | `0022_harden_image_occlusion_grant.sql` | Migração | Remove EXECUTE público da RPC SECURITY DEFINER de oclusão, mantendo acesso para `authenticated`. |
+| `0023_security_definer_cleanup.sql` | Migração | Torna explícito o `search_path` do sync e troca a RPC de oclusão para `SECURITY INVOKER`, removendo lints evitáveis. |
 | `supabase/functions/` | Edge Functions | Implementa sincronização, revisão, embeddings, busca semântica, otimização FSRS, transferência Anki e enfileiramento AI em TypeScript/Deno. |
 | `tests/fsrs_smoke.ts` | Teste local | Exercita o `fsrs-browser` WASM e confirma retorno de 21 parâmetros. |
 | `tests/anki_roundtrip.ts` | Teste local | Exercita exportação/importação `.apkg`, tags, mídia e rejeição de zip-slip. |
@@ -119,6 +120,7 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
   -> 0020_move_pg_net_registration
   -> 0021_ai_ingestion_occlusion_references
   -> 0022_harden_image_occlusion_grant
+  -> 0023_security_definer_cleanup
 ```
 
 As migrações usam `create table if not exists`, `create index if not exists`, `drop policy if exists` e blocos `DO $$ ... $$` para tornar a aplicação repetível em bases que já receberam parte do schema. Idempotência não significa que uma migração possa ser executada fora de ordem. Ela significa que a mesma versão pode ser reaplicada com menor risco durante uma implantação controlada.
@@ -699,7 +701,7 @@ Em produção, acompanhe tamanho de `review_logs`, duração de `get_incremental
 
 | Etapa | Critério de aceite |
 |---|---|
-| Banco | Todas as migrações `0001`–`0022` aplicadas na ordem, sem erro; 0018–0022 aparecem no histórico remoto. |
+| Banco | Todas as migrações `0001`–`0023` aplicadas na ordem, sem erro; 0018–0023 aparecem no histórico remoto. |
 | Edge Functions | As oito funções estão `ACTIVE`, com `verify_jwt=true`, import map pinado e type-check concluído. |
 | Auth | Usuário novo recebe perfil e configurações padrão. |
 | Segurança | RLS testado com pelo menos dois usuários e um papel não autenticado. |
