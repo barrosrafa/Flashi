@@ -13,6 +13,8 @@ As funções desta pasta são TypeScript executado no runtime Deno das Supabase 
 | `fsrs-optimize` | Enfileirar, executar manualmente e consultar otimização | usuário | publicada |
 | `fsrs-optimize-worker` | Processar jobs `queued` em execução agendada | JWT com role `service_role` | publicada; cron é configuração de ambiente |
 | `anki-transfer` | Importar/exportar `.apkg` pelo Storage privado | usuário | publicada |
+| `ai-ingest-worker` | Worker service-role de ingestão AI com claim atómico e materialização | worker 24/7 |
+| `import-deck` | Importação por URL assinada (CSV, Markdown, Quizlet, RemNote) | usuário |
 | `ai-ingest` | Validar fonte e criar jobs de ingestão por IA | usuário | publicada; worker de processamento é separado |
 
 Todas as funções devem permanecer com `verify_jwt=true`. O worker periódico possui uma verificação adicional no corpo, portanto um JWT anônimo válido ainda recebe `403`.
@@ -137,6 +139,8 @@ supabase functions deploy fsrs-optimize
 supabase functions deploy fsrs-optimize-worker
 supabase functions deploy anki-transfer
 supabase functions deploy ai-ingest
+supabase functions deploy ai-ingest-worker
+supabase functions deploy import-deck
 ```
 
 Antes do deploy, valide import map e tipos:

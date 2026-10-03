@@ -43,6 +43,7 @@ curl -sS "$SUPABASE_URL/rest/v1/rpc/add_user_xp" \
 | `get_due_cards_with_exam_schedule` | `POST /rest/v1/rpc/get_due_cards_with_exam_schedule` | Retorna a fila limitada de cartões vencidos e novos, com urgência de prova. | Uma lista de cartões com metadados do exame. |
 | `resolve_socratic_remediation` | `POST /rest/v1/rpc/resolve_socratic_remediation` | Conclui uma sessão socrática pertencente ao usuário e reabilita o cartão. | Um objeto `socratic_remediation_sessions`. |
 | `get_incremental_sync` | `POST /rest/v1/rpc/get_incremental_sync` | Entrega alterações e tombstones após um cursor USN global. | Uma lista ordenada por `usn`. |
+| `sync_session_xp` | `POST /rest/v1/rpc/sync_session_xp` | Calcula e atribui XP uma vez por sessão de estudo. | Sessão, reviews, XP e nível. |
 
 As funções de trigger `check_card_leech_for_socratic()` e `record_sync_grave()` não são endpoints de aplicativo e têm o `EXECUTE` revogado para as roles públicas. Elas são invocadas apenas pelo PostgreSQL.
 
@@ -207,3 +208,11 @@ No ambiente Supabase, confirme a migração `0024_gamification_exams_socratic`, 
 [2]: https://supabase.com/docs/guides/database/functions "Supabase Database Functions"
 [3]: https://supabase.com/docs/reference/javascript/rpc "Supabase JavaScript rpc reference"
 [4]: https://supabase.com/docs/guides/database/postgres/row-level-security "Supabase Row Level Security"
+
+## 8. Ingestão AI, worker e importação
+
+A Edge Function `ai-ingest` apenas cria jobs `queued`. O serviço `ai-ingest-worker` deve correr num container 24/7 com `SUPABASE_SERVICE_ROLE_KEY`, `INGESTION_WORKER_SECRET` e `OPENAI_API_KEY`; ele chama `claim_ai_ingestion_job()` com `FOR UPDATE SKIP LOCKED`, valida o schema estrito do LLM e usa `materialize_ai_ingestion_batch()` numa transação. PDFs têm limite de 15 MiB e paths de Storage são obrigatoriamente prefixados pelo UUID do usuário.
+
+A função `import-deck` recebe `deck_id`, `format` (`csv`, `markdown`, `quizlet` ou `remnote`) e `storage_path` do bucket privado `import-media`. Ela cria uma URL assinada, baixa o ficheiro sem aceitar buffers arbitrários do cliente e encaminha as notas para `materialize_import_batch()`, que reutiliza a mesma materialização transacional da IA.
+
+`sync_session_xp(session_id)` é idempotente: uma chave `(user_id, session_id)` impede XP duplicado. A view materializada `leaderboard_entries` deve ser atualizada fora do caminho de requisição com `REFRESH MATERIALIZED VIEW CONCURRENTLY`.

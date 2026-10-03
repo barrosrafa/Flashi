@@ -6,7 +6,37 @@ O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a 
 
 Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual:** as migrações `0001` até `0023` estão versionadas. `0018_search_optimizer_anki_contracts`, `0019_fsrs_scheduler`, `0020_move_pg_net_registration`, `0021_ai_ingestion_occlusion_references`, `0022_harden_image_occlusion_grant` e `0023_security_definer_cleanup` já foram aplicadas no projeto Supabase `flashi`; o commit remoto de AI foi integrado sem reutilizar a numeração 0018 já aplicada. As funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer` e `ai-ingest` estão publicadas com JWT obrigatório. A busca semântica ainda depende de `OPENAI_API_KEY`; o worker FSRS exige um JWT com role `service_role` quando for acionado por cron; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado neste README. O advisor de segurança remoto retorna zero lints após 0023.
+> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql` e `08_sync_worker_and_contract_hardening.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker` e `import-deck`. A busca semântica depende de `OPENAI_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
+
+A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos, três migrações incrementais de hardening e preserva o histórico em `supabase/migrations_archive/`. Não misture a numeração histórica com a sequência `00`–`08` durante um deploy.
+
+## 0. Sequência implantável da branch `v2`
+
+A sequência efetivamente versionada neste checkout é:
+
+```text
+00_extensions.sql
+  -> 01_types_and_identity.sql
+  -> 02_core_schema.sql
+  -> 03_study_state_and_gamification.sql
+  -> 04_functions_triggers_rls.sql
+  -> 05_workers_storage_realtime.sql
+  -> 06_harden_public_materializer.sql
+  -> 07_import_media_bucket.sql
+  -> 08_sync_worker_and_contract_hardening.sql
+```
+
+- `00` centraliza extensões;
+- `01` cria enums e a base de identidade;
+- `02` cria decks, templates, notes, cards, tags e mídia;
+- `03` cria estado de estudo, sync, ingestão AI, gamificação, exames e remediação;
+- `04` cria triggers, RPCs, funções de domínio, grants e RLS;
+- `05` cria Storage, realtime, `pg_net` e contratos de workers;
+- `06` restringe o materializador de importação a chamadores autenticados;
+- `07` cria o bucket privado `import-media` e policies por usuário;
+- `08` torna o provisionamento de perfil idempotente, amplia `get_incremental_sync()` para as entidades com USN/tombstone já existentes, concede execução dos fluxos de worker necessários e impede escrita direta de badges pelo cliente.
+
+As migrações `06`–`08` são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute-as em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
 
 ## 1. Objetivos do sistema
 
@@ -59,9 +89,9 @@ O cliente sempre opera com um usuário autenticado. As funções que fazem parte
 
 O RLS é uma camada de defesa em profundidade. No Supabase, tabelas expostas precisam ter RLS habilitado e policies explícitas; sem uma policy adequada, o acesso pela API não deve ser considerado permitido [1]. O Storage segue a mesma ideia por meio de policies na tabela `storage.objects` [2].
 
-## 4. Estrutura do repositório
+## 4. Estrutura do repositório e histórico de migrações
 
-As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do schema, mas o Supabase CLI normalmente espera arquivos dentro de `supabase/migrations/`. Antes de usar `supabase db push`, mova ou copie os arquivos para esse diretório, preservando a ordem e os nomes. Como alternativa, execute os scripts em sequência no SQL Editor, em um ambiente de homologação primeiro.
+As migrações implantáveis estão em `supabase/migrations/`, no formato esperado pelo Supabase CLI. A pasta `supabase/migrations_archive/` contém as fontes históricas e não deve ser incluída automaticamente em `db push`. Em um ambiente novo, aplique `00`–`08` em ordem; em um ambiente já parcialmente implantado, compare a tabela de histórico e faça backup antes de aplicar hardenings. A tabela abaixo preserva a decomposição conceitual da série histórica `0001`–`0026`; ela não substitui a sequência implantável descrita na seção 0.
 
 | Arquivo | Tipo | Função |
 |---|---|---|
@@ -89,14 +119,15 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0022_harden_image_occlusion_grant.sql` | Migração | Remove EXECUTE público da RPC SECURITY DEFINER de oclusão, mantendo acesso para `authenticated`. |
 | `0023_security_definer_cleanup.sql` | Migração | Torna explícito o `search_path` do sync e troca a RPC de oclusão para `SECURITY INVOKER`, removendo lints evitáveis. |
 | `0024_gamification_exams_socratic.sql` | Migração | Adiciona XP/níveis/badges, exames com priorização recursiva, remediação socrática de leeches, RLS, USN/graves e RPCs autenticadas. |
+| `0026_sdd_ai_worker_gamification_imports.sql` | Migração | Adiciona worker AI com claim `FOR UPDATE SKIP LOCKED`, materialização transacional, XP batch por sessão, leaderboard materializado e importação CSV/Markdown/Quizlet/RemNote. |
 | `supabase/functions/` | Edge Functions | Implementa sincronização, revisão, embeddings, busca semântica, otimização FSRS, transferência Anki e enfileiramento AI em TypeScript/Deno. |
 | `tests/fsrs_smoke.ts` | Teste local | Exercita o `fsrs-browser` WASM e confirma retorno de 21 parâmetros. |
 | `tests/anki_roundtrip.ts` | Teste local | Exercita exportação/importação `.apkg`, tags, mídia e rejeição de zip-slip. |
 | `validate_sql.py` | Ferramenta local | Faz parse PostgreSQL de todos os arquivos `00*.sql` usando `pglast`. |
 
-## 5. Ordem de implantação e dependências
+## 5. Ordem histórica e dependências conceituais
 
-A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e policies que dependem de objetos anteriores.
+A ordem abaixo documenta as dependências conceituais da série histórica arquivada. Para implantação da branch `v2`, use exclusivamente a sequência `00`–`08` da seção 0; não execute a lista histórica como uma segunda migração sobre o snapshot.
 
 ```text
 0001_types
@@ -123,6 +154,7 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
       -> 0022_harden_image_occlusion_grant
       -> 0023_security_definer_cleanup
       -> 0024_gamification_exams_socratic
+      -> 0026_sdd_ai_worker_gamification_imports
 
 ```
 
@@ -637,6 +669,19 @@ O cliente solicita um job com `fsrs-optimize` e acompanha `fsrs_optimization_run
 ### 24.6 Transferir um pacote Anki
 
 O cliente faz upload para o bucket `anki-transfers` usando o prefixo próprio, chama `anki-transfer` e guarda `job_id`, status e SHA-256. A importação cria conteúdo com provenance Anki e a exportação produz um pacote Basic compatível com a limitação declarada na seção 20. O cliente não deve tentar interpretar o pacote como JSON nem assumir que estados de estudo e revlogs foram preservados.
+
+## 24.1 Contratos adicionados no hardening da v2
+
+A auditoria de paridade entre backend e frontend não criou entidades novas; ela fechou contratos que já existiam no schema:
+
+- `get_incremental_sync()` agora entrega, por cursor USN, decks, notes, cards, mídia, estado de aprendizagem, reviews, tags, templates, configurações, estatísticas, definições de cards, clozes, jobs FSRS, jobs AI, caixas de oclusão, referências, gamificação, badges, exames, sessões socráticas e tombstones autorizados;
+- `handle_new_user()` cria ou completa `profiles` e `study_settings` sem duplicar registros e preserva um `display_name` já existente;
+- `claim_ai_ingestion_job()` e `materialize_ai_ingestion_batch()` ficam disponíveis ao worker `service_role`, enquanto `sync_session_xp()` é executável pelo usuário autenticado;
+- `user_badges` não pode ser inserida, atualizada ou apagada diretamente por `authenticated`; concessão de badges permanece uma responsabilidade do backend;
+- o bucket privado `import-media` é usado pelos fluxos de importação de deck e ingestão de PDF, com paths começando pelo UUID do proprietário;
+- o materializador de importação não aceita mais execução pública anônima.
+
+Esses contratos são deliberadamente separados da UI: o frontend chama somente as operações autenticadas previstas, e os workers não são expostos como endpoints de browser.
 
 ## 25. Segurança operacional
 

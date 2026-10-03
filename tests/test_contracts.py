@@ -120,6 +120,38 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, api_doc)
 
+    def test_0026_sdd_worker_import_and_session_xp_contracts(self):
+        migration = (ROOT / "0026_sdd_ai_worker_gamification_imports.sql").read_text(encoding="utf-8")
+        worker = (ROOT / "supabase/functions/ai-ingest-worker/index.ts").read_text(encoding="utf-8")
+        importer = (ROOT / "supabase/functions/import-deck/index.ts").read_text(encoding="utf-8")
+        for fragment in (
+            "claim_ai_ingestion_job", "for update skip locked", "materialize_ai_ingestion_batch",
+            "notes_count integer", "cards_count integer", "sync_session_xp", "gamification_xp_sessions",
+            "leaderboard_entries", "deck_import_jobs", "materialize_import_batch",
+        ):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, migration.lower())
+        for fragment in ("service_role", "INGESTION_WORKER_SECRET", "MAX_PDF_BYTES", "pdf-parse", "cheerio", "youtube-transcript", "response_format", "json_schema"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, worker)
+        for fragment in ("createSignedUrl", "import-media", "csv", "markdown", "quizlet", "remnote", "materialize_import_batch"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, importer)
+
+    def test_v2_snapshot_layout_and_guardrails(self):
+        snapshot_dir = ROOT / "supabase/migrations"
+        archive_dir = ROOT / "supabase/migrations_archive"
+        expected = [
+            "00_extensions.sql", "01_types_and_identity.sql", "02_core_schema.sql",
+            "03_study_state_and_gamification.sql", "04_functions_triggers_rls.sql",
+            "05_workers_storage_realtime.sql",
+        ]
+        self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
+        self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
+        extensions = (snapshot_dir / expected[0]).read_text(encoding="utf-8")
+        for extension in ('"uuid-ossp"', '"pgcrypto"', '"vector"', '"pg_net"', '"pg_cron"'):
+            self.assertIn(f"create extension if not exists {extension} with schema extensions", extensions)
+        combined = "\n".join((snapshot_dir / name).read_text(encoding="utf-8").lower() for name in expected)
+        for fragment in ("create table if not exists public.notes", "create table if not exists public.cards", "enable row level security", "search_path"):
+            self.assertIn(fragment, combined)
+
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")
         fsrs = (ROOT / "supabase/functions/fsrs-review/index.ts").read_text(encoding="utf-8")
