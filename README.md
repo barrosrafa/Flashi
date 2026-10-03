@@ -38,7 +38,7 @@ A sequência efetivamente versionada neste checkout é:
 - `07` cria o bucket privado `import-media` e policies por usuário;
 - `08` torna o provisionamento de perfil idempotente, amplia `get_incremental_sync()` para as entidades com USN/tombstone já existentes, concede execução dos fluxos de worker necessários e impede escrita direta de badges pelo cliente.
 
-As migrações `06`–`08` são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute-as em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
+As migrações `06`–`08` e as duas migrations com timestamp desta entrega são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute a sequência completa em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
 
 ## 1. Objetivos do sistema
 
@@ -129,7 +129,7 @@ As migrações implantáveis estão em `supabase/migrations/`, no formato espera
 
 ## 5. Ordem histórica e dependências conceituais
 
-A ordem abaixo documenta as dependências conceituais da série histórica arquivada. Para implantação da branch `v2`, use exclusivamente a sequência `00`–`08` da seção 0; não execute a lista histórica como uma segunda migração sobre o snapshot.
+A ordem abaixo documenta as dependências conceituais da série histórica arquivada. Para implantação da branch `v2`, use exclusivamente a sequência implantável completa da seção 0; não execute a lista histórica como uma segunda migração sobre o snapshot.
 
 ```text
 0001_types
