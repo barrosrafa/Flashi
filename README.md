@@ -805,3 +805,11 @@ Em produção, acompanhe tamanho de `review_logs`, duração de `get_incremental
 ## 30. Licença e contribuição
 
 Antes de definir uma licença pública, confirme a titularidade do código e das contribuições. Para contribuir, abra uma branch, altere as migrations de forma incremental, execute `python3 validate_sql.py`, teste em uma base Supabase descartável e descreva no pull request quais tabelas, policies, RPCs e contratos externos foram afetados.
+
+## 24. Contrato de idioma do perfil
+
+A tabela `public.profiles` já contém `language text not null default 'pt-BR'`, conforme `supabase/migrations/01_types_and_identity.sql`. Os valores suportados pelo frontend Flashi são `pt-BR`, `en` e `es`.
+
+A policy `profiles_self`, definida em `supabase/migrations/04_functions_triggers_rls.sql`, permite que um utilizador autenticado leia e atualize apenas o seu próprio perfil (`auth.uid() = id`). Por isso, a troca de idioma não exige API Express intermediária, chave `service_role` no browser ou nova migração: o frontend usa o cliente Supabase com a chave pública e atualiza apenas `profiles.language` do utilizador autenticado.
+
+O frontend também mantém `localStorage` e cookie como fallback offline. Quando uma sessão é iniciada, lê novamente `profiles.language` para sincronizar a preferência persistida.
