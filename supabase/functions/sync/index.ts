@@ -9,7 +9,6 @@ import {
   RequestError,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
-import type { Database } from "../_shared/database.types.ts";
 
 function parseUsn(value: unknown): string {
   if (value === undefined || value === null) return "0";
@@ -55,7 +54,7 @@ Deno.serve(async (request) => {
     });
     if (error) throw new Error(`incremental sync RPC failed: ${error.message}`);
 
-    const fetchedRows = (data ?? []) as Database["public"]["Functions"]["get_incremental_sync"]["Returns"];
+    const fetchedRows = (data ?? []) as Array<{ entity_type: string; entity_key: string; usn: number | string; is_deleted: boolean; payload: Record<string, unknown> | null }>;
     const hasMore = fetchedRows.length > limit;
     const rows = fetchedRows.slice(0, limit);
     const nextUsn = maxReturnedUsn(rows, lastUsn);
