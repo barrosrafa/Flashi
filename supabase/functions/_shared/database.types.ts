@@ -10,7 +10,7 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.17"
+    PostgrestVersion: "14.18"
   }
   public: {
     Tables: {
@@ -583,6 +583,56 @@ export type Database = {
           },
         ]
       }
+      deck_import_jobs: {
+        Row: {
+          created_at: string
+          deck_id: string
+          error_message: string | null
+          format: string
+          id: string
+          imported_cards: number
+          imported_notes: number
+          status: Database["public"]["Enums"]["job_status_type"]
+          storage_path: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          deck_id: string
+          error_message?: string | null
+          format: string
+          id?: string
+          imported_cards?: number
+          imported_notes?: number
+          status?: Database["public"]["Enums"]["job_status_type"]
+          storage_path: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          deck_id?: string
+          error_message?: string | null
+          format?: string
+          id?: string
+          imported_cards?: number
+          imported_notes?: number
+          status?: Database["public"]["Enums"]["job_status_type"]
+          storage_path?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "deck_import_jobs_deck_id_fkey"
+            columns: ["deck_id"]
+            isOneToOne: false
+            referencedRelation: "decks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       decks: {
         Row: {
           created_at: string
@@ -684,6 +734,30 @@ export type Database = {
           status?: string
           user_id?: string
           usn?: number
+        }
+        Relationships: []
+      }
+      gamification_xp_sessions: {
+        Row: {
+          review_count: number
+          session_id: string
+          synced_at: string
+          user_id: string
+          xp_awarded: number
+        }
+        Insert: {
+          review_count: number
+          session_id: string
+          synced_at?: string
+          user_id: string
+          xp_awarded: number
+        }
+        Update: {
+          review_count?: number
+          session_id?: string
+          synced_at?: string
+          user_id?: string
+          xp_awarded?: number
         }
         Relationships: []
       }
@@ -1423,6 +1497,17 @@ export type Database = {
       }
     }
     Views: {
+      leaderboard_entries: {
+        Row: {
+          display_name: string | null
+          level_current: number | null
+          rank: number | null
+          updated_at: string | null
+          user_id: string | null
+          xp_total: number | null
+        }
+        Relationships: []
+      }
       v_deck_tree: {
         Row: {
           depth: number | null
@@ -1454,6 +1539,16 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      claim_ai_ingestion_job: {
+        Args: never
+        Returns: {
+          deck_id: string
+          job_id: string
+          source_reference: string
+          source_type: Database["public"]["Enums"]["generation_source_type"]
+          user_id: string
+        }[]
       }
       claim_fsrs_optimization_job: {
         Args: { p_run_id?: string }
@@ -1621,12 +1716,53 @@ export type Database = {
           usn: number
         }[]
       }
+      list_leaderboard_entries: {
+        Args: { p_limit?: number }
+        Returns: {
+          display_name: string | null
+          level_current: number | null
+          rank: number | null
+          updated_at: string | null
+          user_id: string | null
+          xp_total: number | null
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "leaderboard_entries"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       list_orphaned_card_media: {
         Args: { p_limit?: number }
         Returns: {
           media_id: string
           storage_bucket: string
           storage_path: string
+        }[]
+      }
+      materialize_ai_ingestion_batch: {
+        Args: {
+          p_deck_id: string
+          p_job_id: string
+          p_notes: Json
+          p_user_id: string
+        }
+        Returns: {
+          cards_count: number
+          notes_count: number
+        }[]
+      }
+      materialize_import_batch: {
+        Args: {
+          p_deck_id: string
+          p_job_id: string
+          p_notes: Json
+          p_user_id: string
+        }
+        Returns: {
+          cards_count: number
+          notes_count: number
         }[]
       }
       mcp_create_note: {
@@ -1723,6 +1859,7 @@ export type Database = {
         }
         Returns: string
       }
+      refresh_leaderboard_entries: { Args: never; Returns: undefined }
       resolve_socratic_remediation: {
         Args: { p_session_id: string }
         Returns: {
@@ -1756,6 +1893,16 @@ export type Database = {
         }[]
       }
       soft_delete_deck: { Args: { p_deck_id: string }; Returns: undefined }
+      sync_session_xp: {
+        Args: { p_session_id: string }
+        Returns: {
+          level_current: number
+          review_count: number
+          session_id: string
+          xp_awarded: number
+          xp_total: number
+        }[]
+      }
     }
     Enums: {
       card_state: "new" | "learning" | "review" | "relearning"
@@ -1790,12 +1937,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1819,11 +1966,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1844,11 +1991,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1869,11 +2016,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1886,11 +2033,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }

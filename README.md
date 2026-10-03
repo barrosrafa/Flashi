@@ -6,9 +6,9 @@ O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a 
 
 Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql` e `08_sync_worker_and_contract_hardening.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker` e `import-deck`. A busca semântica depende de `OPENAI_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
+> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql`, `08_sync_worker_and_contract_hardening.sql`, `20261003220359_sdd_feature_exposure.sql` e `20261003220443_leaderboard_rpc_and_indexes.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker` e `import-deck`. A busca semântica depende de `OPENAI_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
 
-A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos, três migrações incrementais de hardening e preserva o histórico em `supabase/migrations_archive/`. Não misture a numeração histórica com a sequência `00`–`08` durante um deploy.
+A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos, cinco migrações incrementais de hardening e preserva o histórico em `supabase/migrations_archive/`. Não misture a numeração histórica com a sequência implantável atual durante um deploy.
 
 ## 0. Sequência implantável da branch `v2`
 
@@ -24,6 +24,8 @@ A sequência efetivamente versionada neste checkout é:
   -> 06_harden_public_materializer.sql
   -> 07_import_media_bucket.sql
   -> 08_sync_worker_and_contract_hardening.sql
+  -> 20261003220359_sdd_feature_exposure.sql
+  -> 20261003220443_leaderboard_rpc_and_indexes.sql
 ```
 
 - `00` centraliza extensões;
@@ -91,7 +93,7 @@ O RLS é uma camada de defesa em profundidade. No Supabase, tabelas expostas pre
 
 ## 4. Estrutura do repositório e histórico de migrações
 
-As migrações implantáveis estão em `supabase/migrations/`, no formato esperado pelo Supabase CLI. A pasta `supabase/migrations_archive/` contém as fontes históricas e não deve ser incluída automaticamente em `db push`. Em um ambiente novo, aplique `00`–`08` em ordem; em um ambiente já parcialmente implantado, compare a tabela de histórico e faça backup antes de aplicar hardenings. A tabela abaixo preserva a decomposição conceitual da série histórica `0001`–`0026`; ela não substitui a sequência implantável descrita na seção 0.
+As migrações implantáveis estão em `supabase/migrations/`, no formato esperado pelo Supabase CLI. A pasta `supabase/migrations_archive/` contém as fontes históricas e não deve ser incluída automaticamente em `db push`. Em um ambiente novo, aplique a sequência implantável completa em ordem; em um ambiente já parcialmente implantado, compare a tabela de histórico e faça backup antes de aplicar hardenings. A tabela abaixo preserva a decomposição conceitual da série histórica `0001`–`0026`; ela não substitui a sequência implantável descrita na seção 0.
 
 | Arquivo | Tipo | Função |
 |---|---|---|
@@ -813,3 +815,24 @@ A tabela `public.profiles` já contém `language text not null default 'pt-BR'`,
 A policy `profiles_self`, definida em `supabase/migrations/04_functions_triggers_rls.sql`, permite que um utilizador autenticado leia e atualize apenas o seu próprio perfil (`auth.uid() = id`). Por isso, a troca de idioma não exige API Express intermediária, chave `service_role` no browser ou nova migração: o frontend usa o cliente Supabase com a chave pública e atualiza apenas `profiles.language` do utilizador autenticado.
 
 O frontend também mantém `localStorage` e cookie como fallback offline. Quando uma sessão é iniciada, lê novamente `profiles.language` para sincronizar a preferência persistida.
+
+## SDD — capacidades liberadas para o usuário final
+
+A implementação atual expõe todas as funcionalidades previstas no SDD: estudo offline-first com outbox e retry, fila priorizada por exames, XP idempotente por sessão, leaderboard materializado, gamificação/badges, configurações completas de SRS/FSRS, CRUD de decks com hierarquia e restauração, importação transacional de CSV/Markdown/Quizlet/RemNote/URL, ingestão por IA com monitor de jobs, mídia/oclusão, busca semântica, Anki e colaboração.
+
+### Migrations adicionadas
+- `supabase/migrations/20261003220359_sdd_feature_exposure.sql`: habilita o refresh autenticado do leaderboard sem abrir escrita direta na projeção.
+- `supabase/migrations/20261003220443_leaderboard_rpc_and_indexes.sql`: expõe a leitura do ranking por `list_leaderboard_entries(limit)` bounded RPC e adiciona índices de jobs/badges; a materialized view não fica diretamente acessível pelo PostgREST.
+- O XP continua sendo persistido apenas por `sync_session_xp(uuid)`, que é idempotente por `(user_id, session_id)`.
+
+### Validação
+
+```bash
+# validar o contrato TypeScript compartilhado
+pnpm exec tsc --noEmit
+
+# executar o frontend em desenvolvimento
+pnpm dev
+```
+
+As Edge Functions continuam usando autenticação do usuário e RLS; nenhum bucket privado ou tabela de jobs é tornado público pela migration.
