@@ -8,6 +8,8 @@ Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incre
 
 > **Estado atual:** as migrações `0001` até `0023` estão versionadas. `0018_search_optimizer_anki_contracts`, `0019_fsrs_scheduler`, `0020_move_pg_net_registration`, `0021_ai_ingestion_occlusion_references`, `0022_harden_image_occlusion_grant` e `0023_security_definer_cleanup` já foram aplicadas no projeto Supabase `flashi`; o commit remoto de AI foi integrado sem reutilizar a numeração 0018 já aplicada. As funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer` e `ai-ingest` estão publicadas com JWT obrigatório. A busca semântica ainda depende de `OPENAI_API_KEY`; o worker FSRS exige um JWT com role `service_role` quando for acionado por cron; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado neste README. O advisor de segurança remoto retorna zero lints após 0023.
 
+A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos e preserva o histórico em `supabase/migrations_archive/`.
+
 ## 1. Objetivos do sistema
 
 O banco precisa resolver quatro problemas diferentes sem misturar suas responsabilidades. O primeiro é armazenar conteúdo: decks, notas, cartões, templates, tags e mídia. O segundo é armazenar o histórico de estudo por usuário, sem transformar o conteúdo compartilhado em estado global. O terceiro é garantir sincronização confiável entre dispositivos, inclusive quando uma exclusão ocorrer offline. O quarto é oferecer contratos seguros para automações, busca semântica, ingestão por IA, interoperabilidade com Anki e MCP.
