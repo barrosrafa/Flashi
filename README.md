@@ -89,6 +89,7 @@ As migrações estão atualmente na raiz do projeto. Isso facilita a revisão do
 | `0022_harden_image_occlusion_grant.sql` | Migração | Remove EXECUTE público da RPC SECURITY DEFINER de oclusão, mantendo acesso para `authenticated`. |
 | `0023_security_definer_cleanup.sql` | Migração | Torna explícito o `search_path` do sync e troca a RPC de oclusão para `SECURITY INVOKER`, removendo lints evitáveis. |
 | `0024_gamification_exams_socratic.sql` | Migração | Adiciona XP/níveis/badges, exames com priorização recursiva, remediação socrática de leeches, RLS, USN/graves e RPCs autenticadas. |
+| `0026_sdd_ai_worker_gamification_imports.sql` | Migração | Adiciona worker AI com claim `FOR UPDATE SKIP LOCKED`, materialização transacional, XP batch por sessão, leaderboard materializado e importação CSV/Markdown/Quizlet/RemNote. |
 | `supabase/functions/` | Edge Functions | Implementa sincronização, revisão, embeddings, busca semântica, otimização FSRS, transferência Anki e enfileiramento AI em TypeScript/Deno. |
 | `tests/fsrs_smoke.ts` | Teste local | Exercita o `fsrs-browser` WASM e confirma retorno de 21 parâmetros. |
 | `tests/anki_roundtrip.ts` | Teste local | Exercita exportação/importação `.apkg`, tags, mídia e rejeição de zip-slip. |
@@ -123,6 +124,7 @@ A ordem é obrigatória porque as migrações criam tipos, tabelas, funções e 
       -> 0022_harden_image_occlusion_grant
       -> 0023_security_definer_cleanup
       -> 0024_gamification_exams_socratic
+      -> 0026_sdd_ai_worker_gamification_imports
 
 ```
 

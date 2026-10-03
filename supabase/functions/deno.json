@@ -9,6 +9,9 @@
     "@sqlite.org/sqlite-wasm": "npm:@sqlite.org/sqlite-wasm@3.53.0-build1",
     "fflate": "npm:fflate@0.8.3",
     "fsrs-browser": "npm:fsrs-browser@6.6.0/fsrs_browser.js",
-    "ts-fsrs": "npm:ts-fsrs@5.4.1"
+    "ts-fsrs": "npm:ts-fsrs@5.4.1",
+    "cheerio": "npm:cheerio@1.0.0",
+    "youtube-transcript": "npm:youtube-transcript@1.2.1",
+    "pdf-parse": "npm:pdf-parse@1.1.1"
   }
 }

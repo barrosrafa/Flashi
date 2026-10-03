@@ -120,6 +120,21 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, api_doc)
 
+    def test_0026_sdd_worker_import_and_session_xp_contracts(self):
+        migration = (ROOT / "0026_sdd_ai_worker_gamification_imports.sql").read_text(encoding="utf-8")
+        worker = (ROOT / "supabase/functions/ai-ingest-worker/index.ts").read_text(encoding="utf-8")
+        importer = (ROOT / "supabase/functions/import-deck/index.ts").read_text(encoding="utf-8")
+        for fragment in (
+            "claim_ai_ingestion_job", "for update skip locked", "materialize_ai_ingestion_batch",
+            "notes_count integer", "cards_count integer", "sync_session_xp", "gamification_xp_sessions",
+            "leaderboard_entries", "deck_import_jobs", "materialize_import_batch",
+        ):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, migration.lower())
+        for fragment in ("service_role", "INGESTION_WORKER_SECRET", "MAX_PDF_BYTES", "pdf-parse", "cheerio", "youtube-transcript", "response_format", "json_schema"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, worker)
+        for fragment in ("createSignedUrl", "import-media", "csv", "markdown", "quizlet", "remnote", "materialize_import_batch"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, importer)
+
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")
         fsrs = (ROOT / "supabase/functions/fsrs-review/index.ts").read_text(encoding="utf-8")
