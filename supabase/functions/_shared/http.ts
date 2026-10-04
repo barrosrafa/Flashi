@@ -1,9 +1,16 @@
-const ALLOWED_ORIGINS = new Set(
-  (Deno.env.get("ALLOWED_ORIGINS") ?? "")
+function parseAllowedOrigins(value: string | undefined): string[] {
+  return (value ?? "")
     .split(",")
     .map((origin) => origin.trim())
-    .filter(Boolean),
-);
+    .filter(Boolean);
+}
+
+function getAllowedOrigins(): Set<string> {
+  return new Set([
+    ...parseAllowedOrigins(Deno.env.get("ALLOWED_ORIGINS")),
+    ...parseAllowedOrigins(Deno.env.get("PREVIEW_ALLOWED_ORIGINS")),
+  ]);
+}
 
 const ALLOW_HEADERS = "authorization, x-client-info, apikey, content-type";
 const ALLOW_METHODS = "POST, OPTIONS";
@@ -21,7 +28,7 @@ export function getCorsHeaders(request?: Request): Record<string, string> {
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin",
   };
-  if (origin && ALLOWED_ORIGINS.has(origin)) headers["Access-Control-Allow-Origin"] = origin;
+  if (origin && getAllowedOrigins().has(origin)) headers["Access-Control-Allow-Origin"] = origin;
   return headers;
 }
 

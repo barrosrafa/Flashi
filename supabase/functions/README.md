@@ -183,3 +183,8 @@ python3 validate_readme.py
 ```
 
 O smoke test FSRS inicializa o WASM no Deno e confirma 21 parâmetros. A função `sync` consulta `limit + 1` registros e devolve no máximo `limit`, evitando uma página final vazia; a regra `cursor_commit_rule` permanece obrigatória. O tipo gerado em `_shared/database.types.ts` é a fonte compartilhada para tabelas e RPCs. O round-trip Anki gera uma coleção SQLite em memória, testa nota, tags, mídia e rejeição de zip-slip. Testes remotos sem usuário autenticado validam apenas o contrato de borda: endpoints de usuário devem responder `401`, e o worker deve responder `403` a um JWT anônimo. Para validar busca semântica, revisão autenticada, jobs e Storage, é necessário um usuário de homologação e os secrets configurados no próprio projeto; não enviar tokens pelo chat.
+
+
+## CORS para previews temporários
+
+`ALLOWED_ORIGINS` continua sendo a allowlist principal. Para adicionar um host temporário sem sobrescrever nem precisar revelar o valor existente, configure o segredo opcional `PREVIEW_ALLOWED_ORIGINS` com uma ou mais origens completas separadas por vírgula. O helper combina as duas listas por correspondência exata; não use `*` nem padrões de subdomínio. Remova as origens temporárias ao encerrar os testes. As funções continuam exigindo JWT e as políticas RLS permanecem inalteradas.
