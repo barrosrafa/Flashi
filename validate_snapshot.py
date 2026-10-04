@@ -1,7 +1,7 @@
-"""Static validation for the six-file schema snapshot.
+"""Static validation for the versioned schema snapshot.
 
 A live schema diff still requires a PostgreSQL/Supabase project; this validator
-covers the repository-side invariants that can run in CI without credentials.
+covers repository-side invariants that can run in CI without credentials.
 """
 from pathlib import Path
 import re
@@ -17,26 +17,39 @@ EXPECTED = [
     "03_study_state_and_gamification.sql",
     "04_functions_triggers_rls.sql",
     "05_workers_storage_realtime.sql",
+    "06_harden_public_materializer.sql",
+    "07_import_media_bucket.sql",
+    "08_sync_worker_and_contract_hardening.sql",
+    "20261003220359_sdd_feature_exposure.sql",
+    "20261003220443_leaderboard_rpc_and_indexes.sql",
+    "20261004023000_ai_ingestion_worker_cron.sql",
 ]
 
 
 def main() -> None:
-    actual = sorted(p.name for p in MIGRATIONS.glob("*.sql"))
+    actual = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     if actual != EXPECTED:
         raise SystemExit(f"snapshot files mismatch: {actual}")
-    archived = sorted(p.name for p in ARCHIVE.glob("*.sql"))
+    archived = sorted(path.name for path in ARCHIVE.glob("*.sql"))
     if len(archived) < 26:
         raise SystemExit(f"expected at least 26 archived migrations, found {len(archived)}")
-    extension_sql = (MIGRATIONS / EXPECTED[0]).read_text()
+    extension_sql = (MIGRATIONS / EXPECTED[0]).read_text(encoding="utf-8")
     for extension in ('"uuid-ossp"', '"pgcrypto"', '"vector"', '"pg_net"', '"pg_cron"'):
         if f"create extension if not exists {extension} with schema extensions" not in extension_sql:
             raise SystemExit(f"missing centralized extension: {extension}")
-    for path in (MIGRATIONS / name for name in EXPECTED):
-        statements = parse_sql(path.read_text())
-        if not statements:
-            raise SystemExit(f"empty snapshot: {path.name}")
-    combined = "\n".join((MIGRATIONS / name).read_text().lower() for name in EXPECTED)
-    required = ("create table if not exists public.notes", "create table if not exists public.cards", "note_id", "enable row level security", "search_path")
+    for name in EXPECTED:
+        if not parse_sql((MIGRATIONS / name).read_text(encoding="utf-8")):
+            raise SystemExit(f"empty snapshot: {name}")
+    combined = "\n".join((MIGRATIONS / name).read_text(encoding="utf-8").lower() for name in EXPECTED)
+    required = (
+        "create table if not exists public.notes",
+        "create table if not exists public.cards",
+        "note_id",
+        "enable row level security",
+        "search_path",
+        "configure_ai_ingestion_cron",
+        "flashi_ingestion_worker_secret",
+    )
     for fragment in required:
         if fragment not in combined:
             raise SystemExit(f"missing snapshot contract: {fragment}")

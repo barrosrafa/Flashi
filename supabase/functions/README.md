@@ -1,6 +1,6 @@
 # Flashi Edge Functions
 
-As funções desta pasta são TypeScript executado no runtime Deno das Supabase Edge Functions. As funções de usuário encaminham o JWT recebido ao Supabase para manter `auth.uid()` e RLS ativos. O único componente com credencial de serviço é `fsrs-optimize-worker`, que executa jobs enfileirados e só aceita JWT cujo claim `role` seja `service_role`.
+As funções desta pasta são TypeScript executado no runtime Deno das Supabase Edge Functions. As funções de usuário encaminham o JWT recebido ao Supabase para manter `auth.uid()` e RLS ativos. `fsrs-optimize-worker` e `ai-ingest-worker` usam credenciais de serviço somente no backend; o worker de IA também exige `INGESTION_WORKER_SECRET`.
 
 ## Inventário publicado
 
@@ -13,11 +13,11 @@ As funções desta pasta são TypeScript executado no runtime Deno das Supabase 
 | `fsrs-optimize` | Enfileirar, executar manualmente e consultar otimização | usuário | publicada |
 | `fsrs-optimize-worker` | Processar jobs `queued` em execução agendada | JWT com role `service_role` | publicada; cron é configuração de ambiente |
 | `anki-transfer` | Importar/exportar `.apkg` pelo Storage privado | usuário | publicada |
-| `ai-ingest-worker` | Worker service-role de ingestão AI com claim atómico e materialização | worker 24/7 |
-| `import-deck` | Importação por URL assinada (CSV, Markdown, Quizlet, RemNote) | usuário |
+| `ai-ingest-worker` | Worker service-role de ingestão IA com claim atômico e materialização | publicada; exige scheduler opt-in e secrets |
+| `import-deck` | Importação de arquivo ou URL HTTPS no servidor (CSV, Markdown, Quizlet, RemNote) | usuário |
 | `ai-ingest` | Validar fonte e criar jobs de ingestão por IA | usuário | publicada; worker de processamento é separado |
 
-Todas as funções devem permanecer com `verify_jwt=true`. O worker periódico possui uma verificação adicional no corpo, portanto um JWT anônimo válido ainda recebe `403`.
+As funções de usuário devem permanecer com `verify_jwt=true`. `ai-ingest-worker` usa `verify_jwt=false` no gateway porque valida no corpo o JWT `service_role` e o header secreto `x-worker-secret`; não deve ser chamado pelo browser.
 
 ## Variáveis e secrets
 
@@ -28,10 +28,11 @@ supabase secrets set \
   SUPABASE_URL="https://<project-ref>.supabase.co" \
   SUPABASE_ANON_KEY="<anon-key>" \
   SUPABASE_SERVICE_ROLE_KEY="<service-role-key>" \
-  OPENAI_API_KEY="<embedding-provider-key>"
+  OPENAI_API_KEY="<embedding-provider-key>" \
+  INGESTION_WORKER_SECRET="<random-secret-com-ao-menos-32-caracteres>"
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` é usado apenas pelo `fsrs-optimize-worker`. `OPENAI_API_KEY` é usada por `embeddings` e `semantic-search` no modo `semantic`. O modelo padrão é `text-embedding-3-small` e o código exige dimensão 1536; só configure `EMBEDDING_MODEL` se o provedor continuar entregando exatamente essa dimensão. Secrets não aparecem nos responses nem nos logs intencionais.
+`SUPABASE_SERVICE_ROLE_KEY` e `INGESTION_WORKER_SECRET` são usados apenas no backend. `OPENAI_API_KEY` é usada por embeddings, busca semântica e geração de notas IA. O modelo padrão de embeddings é `text-embedding-3-small` e o código exige dimensão 1536; só configure `EMBEDDING_MODEL` se o provedor continuar entregando exatamente essa dimensão. Secrets não aparecem nos responses nem nos logs intencionais.
 
 ## Busca semântica
 
@@ -83,7 +84,17 @@ Endpoint: `POST /functions/v1/ai-ingest`. A função valida `deck_id`, aceita `s
 }
 ```
 
-O worker futuro deve fazer claim atômico, impor o limite de 15 MiB para PDFs, validar a saída estruturada, materializar notas e cartões em uma transação e marcar `completed` ou `failed`. Não enviar credenciais de LLM ao cliente e não registrar conteúdo sensível no job.
+O worker faz claim atômico, impõe 15 MiB para PDFs, valida a saída estruturada, materializa notas e cartões em uma transação e marca `completed` ou `failed`. A materialização grava diretamente no deck; a tela mostra a contagem e um link para os cartões. Não enviar credenciais de LLM ao cliente nem registrar conteúdo sensível no job.
+
+### Agendamento opt-in do worker
+
+Sem cron ou worker externo, jobs permanecem `queued`. Para habilitar o cron nativo, configure `INGESTION_WORKER_SECRET` como secret da Edge Function e guarde no Supabase Vault os nomes `flashi_service_role_jwt` e `flashi_ingestion_worker_secret` (o segundo deve ser igual ao secret da função). Aplique `20261004023000_ai_ingestion_worker_cron.sql` e chame, como operador:
+
+```sql
+select private.configure_ai_ingestion_cron('https://<project-ref>.supabase.co', '*/1 * * * *');
+```
+
+A chamada é opt-in e os jobs pendentes começarão a ser processados em ordem; confira a fila antes de ativá-la. Não exponha nenhum secret ao cliente, a logs ou a arquivos versionados.
 
 ## Transferência Anki `.apkg`
 
