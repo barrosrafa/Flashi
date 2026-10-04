@@ -5,6 +5,12 @@
 -- materialized projection already used by the product.
 begin;
 
+-- The Edge Function uses service_role for this private cache; no browser
+-- object policy is needed because clients receive audio directly from TTS.
+insert into storage.buckets (id, name, public)
+values ('tts_cache', 'tts_cache', false)
+on conflict (id) do nothing;
+
 -- Advanced card metadata -----------------------------------------------------
 alter table public.cards add column if not exists type_answer_validation jsonb not null default '{}'::jsonb;
 
