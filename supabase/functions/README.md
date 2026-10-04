@@ -16,8 +16,16 @@ As funções desta pasta são TypeScript executado no runtime Deno das Supabase 
 | `ai-ingest-worker` | Worker service-role de ingestão IA com claim atômico e materialização | publicada; exige scheduler opt-in e secrets |
 | `import-deck` | Importação de arquivo ou URL HTTPS no servidor (CSV, Markdown, Quizlet, RemNote) | usuário |
 | `ai-ingest` | Validar fonte e criar jobs de ingestão por IA | usuário | publicada; worker de processamento é separado |
+| `tts` | Sintetizar fala com cache determinístico em Storage | usuário | requer `ELEVENLABS_API_KEY`; cache é assíncrono |
+| `activation` | Validar e processar ativação com fingerprint, idempotência e request ID | usuário | migration `20261004130000_sdd_mission_hardening` |
 
 As funções de usuário devem permanecer com `verify_jwt=true`. `ai-ingest-worker` usa `verify_jwt=false` no gateway porque valida no corpo o JWT `service_role` e o header secreto `x-worker-secret`; não deve ser chamado pelo browser.
+
+## Ativação SDD
+
+`POST /functions/v1/activation` exige JWT de usuário e o header `Idempotency-Key`. O corpo aceita somente `goal`, `target_date` e `weekly_minutes`; propriedades extras são rejeitadas com `422 BOPLA_REJECTED`. A função calcula um fingerprint SHA-256, propaga `X-Request-Id` e chama `public.process_activation()`. Uma repetição com a mesma chave e payload retorna o resultado persistido; a mesma chave com outro payload retorna `422`, e uma operação concorrente retorna `409`.
+
+A migration `20261004130000_sdd_mission_hardening.sql` cria `activation_flows`, `activation_idempotency`, `user_entitlements`, `user_quotas` e o contador atômico `consume_user_rate_limit()`, todos protegidos por RLS ou grants mínimos. Entitlements e quotas são fronteiras preparadas para billing futuro e não liberam cobrança nem gateway.
 
 ## Variáveis e secrets
 
@@ -29,10 +37,17 @@ supabase secrets set \
   SUPABASE_ANON_KEY="<anon-key>" \
   SUPABASE_SERVICE_ROLE_KEY="<service-role-key>" \
   OPENAI_API_KEY="<embedding-provider-key>" \
-  INGESTION_WORKER_SECRET="<random-secret-com-ao-menos-32-caracteres>"
+  INGESTION_WORKER_SECRET="<random-secret-com-ao-menos-32-caracteres>" \
+  ELEVENLABS_API_KEY="<tts-provider-key>"
 ```
 
 `SUPABASE_SERVICE_ROLE_KEY` e `INGESTION_WORKER_SECRET` são usados apenas no backend. `OPENAI_API_KEY` é usada por embeddings, busca semântica e geração de notas IA. O modelo padrão de embeddings é `text-embedding-3-small` e o código exige dimensão 1536; só configure `EMBEDDING_MODEL` se o provedor continuar entregando exatamente essa dimensão. Secrets não aparecem nos responses nem nos logs intencionais.
+
+## Texto para fala e assinatura de webhooks
+
+`tts` exige JWT de usuário e aceita `GET /functions/v1/tts?text=...&voiceId=...` ou um POST JSON com os mesmos campos. O texto é limitado a 5.000 caracteres, o `voiceId` aceita apenas caracteres seguros e a assinatura do cache é SHA-256 de `{ text, voiceId }`. O arquivo é procurado no bucket privado `tts_cache`; em cache retorna `X-Cache: HIT`, caso contrário o áudio do provedor é servido imediatamente e o upload é agendado com `EdgeRuntime.waitUntil`, retornando `X-Cache: MISS`. Sem `ELEVENLABS_API_KEY`, a resposta é `503 PROVIDER_UNAVAILABLE`.
+
+`supabase/functions/_shared/crypto.ts` expõe `signWebhookPayload(secret, payload)`, uma assinatura hexadecimal HMAC-SHA256 baseada apenas na Web Crypto API do Deno. Os consumidores devem comparar a assinatura do corpo bruto antes de processar o evento. A migração `20261004120000_sdd_activation_expansion.sql` cria os contratos de traduções, sessões de jogo, webhooks e API keys; o segredo de webhook é de acesso restrito por RLS e as API keys armazenam somente `key_hash`.
 
 ## Busca semântica
 
@@ -137,7 +152,7 @@ A exportação atual é de conteúdo, não de histórico completo. Ela cria um m
 
 ## Deploy
 
-Aplique as migrações em `supabase/migrations/` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021`–`0024` criam e endurecem a fila AI, oclusão, referências, contratos de gamificação e policies. `0025_user_function_rate_limits` cria o contador atômico por usuário/função usado por `embeddings` e `semantic-search`. Em uma base já sincronizada até `0024`, aplique somente `0025` com `supabase db push` ou pelo fluxo de migração homologado.
+Aplique as migrações em `supabase/migrations/` na ordem. `0018_search_optimizer_anki_contracts` cria o bucket `anki-transfers`, os contratos de jobs FSRS e `create_anki_transfer_job()`. `0019_fsrs_scheduler` habilita `pg_cron`/`pg_net` e cria `private.configure_fsrs_optimizer_cron()`, que só agenda o worker depois que o operador guarda `flashi_service_role_jwt` no Vault. `0020_move_pg_net_registration` move o namespace de registro do pg_net para `extensions`; só use a estratégia de drop/recreate quando a fila estiver vazia e não existirem dependências externas, ou solicite o procedimento assistido do Supabase. `0021`–`0024` criam e endurecem a fila AI, oclusão, referências, contratos de gamificação e policies. `0025_user_function_rate_limits` cria o contador atômico por usuário/função usado por `embeddings` e `semantic-search`. `20261004120000_sdd_activation_expansion` acrescenta os campos/tabelas SDD compatíveis com o snapshot, sem duplicar `profiles`, `ai_ingestion_jobs` ou o leaderboard materializado. Em uma base já sincronizada até `0024`, não salte a sequência: aplique as migrações implantáveis em ordem e homologue antes de liberar TTS ou os novos contratos.
 
 Com Supabase CLI:
 
@@ -152,6 +167,8 @@ supabase functions deploy anki-transfer
 supabase functions deploy ai-ingest
 supabase functions deploy ai-ingest-worker
 supabase functions deploy import-deck
+supabase functions deploy tts
+supabase functions deploy activation
 ```
 
 Antes do deploy, valide import map e tipos:
@@ -183,3 +200,8 @@ python3 validate_readme.py
 ```
 
 O smoke test FSRS inicializa o WASM no Deno e confirma 21 parâmetros. A função `sync` consulta `limit + 1` registros e devolve no máximo `limit`, evitando uma página final vazia; a regra `cursor_commit_rule` permanece obrigatória. O tipo gerado em `_shared/database.types.ts` é a fonte compartilhada para tabelas e RPCs. O round-trip Anki gera uma coleção SQLite em memória, testa nota, tags, mídia e rejeição de zip-slip. Testes remotos sem usuário autenticado validam apenas o contrato de borda: endpoints de usuário devem responder `401`, e o worker deve responder `403` a um JWT anônimo. Para validar busca semântica, revisão autenticada, jobs e Storage, é necessário um usuário de homologação e os secrets configurados no próprio projeto; não enviar tokens pelo chat.
+
+
+## CORS para previews temporários
+
+`ALLOWED_ORIGINS` continua sendo a allowlist principal. Para adicionar um host temporário sem sobrescrever nem precisar revelar o valor existente, configure o segredo opcional `PREVIEW_ALLOWED_ORIGINS` com uma ou mais origens completas separadas por vírgula. O helper combina as duas listas por correspondência exata; não use `*` nem padrões de subdomínio. Remova as origens temporárias ao encerrar os testes. As funções continuam exigindo JWT e as políticas RLS permanecem inalteradas.

@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   boundedInteger,
@@ -19,7 +20,7 @@ type SearchMode = "semantic" | "lexical";
 
 import { DIMENSIONS, MODEL, requestEmbedding } from "../_shared/embeddings.ts";
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("semantic-search", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
   if (request.method !== "POST") {
@@ -69,6 +70,6 @@ Deno.serve(async (request) => {
       results: data ?? [],
     });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "semantic-search");
   }
-});
+}));

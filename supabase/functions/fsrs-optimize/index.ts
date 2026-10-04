@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   handleError,
@@ -12,7 +13,7 @@ import {
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
 import { MAX_REVIEWS, optimizeWeights, toFiniteWeights } from "../_shared/fsrs-optimizer.ts";
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("fsrs-optimize", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
   if (request.method !== "POST") {
@@ -95,6 +96,6 @@ Deno.serve(async (request) => {
         p_error_message: error instanceof Error ? error.message : "Unknown optimizer error",
       });
     }
-    return handleError(error, request);
+    return handleError(error, request, "fsrs-optimize");
   }
-});
+}));

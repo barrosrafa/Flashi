@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
 import {
   errorResponse,
@@ -19,7 +20,7 @@ import {
 
 const FORMATS = new Set(["csv", "markdown", "quizlet", "remnote"]);
 const IMPORT_BUCKET = "import-media";
-Deno.serve(async (request) => {
+Deno.serve(withObservability("import-deck", async (request) => {
   const cors = handleCors(request);
   if (cors) return cors;
   if (request.method !== "POST") {
@@ -157,6 +158,6 @@ Deno.serve(async (request) => {
     if (client && remoteStoragePath) {
       await client.storage.from(IMPORT_BUCKET).remove([remoteStoragePath]);
     }
-    return handleError(error, request);
+    return handleError(error, request, "import-deck");
   }
-});
+}));

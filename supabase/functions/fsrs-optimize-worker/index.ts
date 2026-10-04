@@ -1,5 +1,7 @@
+import { withObservability } from "../_shared/observability.ts";
 import { optimizeWeights, MAX_REVIEWS, toFiniteWeights } from "../_shared/fsrs-optimizer.ts";
 import { errorResponse, handleCors, handleError, jsonResponse } from "../_shared/http.ts";
+import { createObservedFetch } from "../_shared/observability.ts";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 function requiredEnv(name: string): string {
@@ -23,22 +25,22 @@ function jwtRole(request: Request): string | null {
   }
 }
 
-function createAdminClient(): SupabaseClient {
+function createAdminClient(request: Request): SupabaseClient {
   return createClient(
     requiredEnv("SUPABASE_URL"),
     requiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
-    { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } },
+    { global: { fetch: createObservedFetch({ dependency: "supabase-admin", functionName: "fsrs-optimize-worker", requestId: request.headers.get("x-request-id") ?? undefined }) }, auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } },
   );
 }
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("fsrs-optimize-worker", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
   if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
   if (jwtRole(request) !== "service_role") return errorResponse(request, "Forbidden", 403, "FORBIDDEN");
 
   try {
-    const client = createAdminClient();
+    const client = createAdminClient(request);
     const body = await request.json().catch(() => ({})) as { run_id?: string; limit?: number };
     const requestedLimit = Number(body.limit ?? 1);
     const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(5, requestedLimit)) : 1;
@@ -99,6 +101,6 @@ Deno.serve(async (request) => {
 
     return jsonResponse(request, { processed: results.length, results });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "fsrs-optimize-worker");
   }
-});
+}));

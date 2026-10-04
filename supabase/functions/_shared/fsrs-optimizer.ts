@@ -3,6 +3,7 @@ type FsrsModule = {
   TrainingConfig: typeof import("fsrs-browser").TrainingConfig;
   initSync: (input: { module: ArrayBuffer }) => unknown;
 };
+import { fetchWithObservability } from "./observability.ts";
 
 export const MAX_REVIEWS = 25_000;
 const DEFAULT_EPOCHS = 10;
@@ -27,7 +28,7 @@ export async function initializeFsrs(): Promise<void> {
       fsrsModule = module;
       const moduleUrl = import.meta.resolve("fsrs-browser");
       const wasmUrl = new URL("fsrs_browser_bg.wasm", moduleUrl);
-      const response = await fetch(wasmUrl);
+      const response = await fetchWithObservability(wasmUrl, undefined, { dependency: "fsrs-wasm" });
       if (!response.ok) throw new Error(`Unable to load FSRS WASM: ${response.status}`);
       const wasmBytes = await response.arrayBuffer();
       module.initSync({ module: wasmBytes });

@@ -6,7 +6,7 @@ O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a 
 
 Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql`, `08_sync_worker_and_contract_hardening.sql`, `20261003220359_sdd_feature_exposure.sql` e `20261003220443_leaderboard_rpc_and_indexes.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker` e `import-deck`. A busca semântica depende de `OPENAI_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
+> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql`, `08_sync_worker_and_contract_hardening.sql`, `20261003220359_sdd_feature_exposure.sql`, `20261003220443_leaderboard_rpc_and_indexes.sql` e `20261004120000_sdd_activation_expansion.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker`, `import-deck` e, quando o secret do provedor está configurado, `tts`. A busca semântica depende de `OPENAI_API_KEY`; TTS depende de `ELEVENLABS_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
 
 A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos, cinco migrações incrementais de hardening e preserva o histórico em `supabase/migrations_archive/`. Não misture a numeração histórica com a sequência implantável atual durante um deploy.
 
@@ -26,6 +26,7 @@ A sequência efetivamente versionada neste checkout é:
   -> 08_sync_worker_and_contract_hardening.sql
   -> 20261003220359_sdd_feature_exposure.sql
   -> 20261003220443_leaderboard_rpc_and_indexes.sql
+  -> 20261004120000_sdd_activation_expansion.sql
 ```
 
 - `00` centraliza extensões;
@@ -37,8 +38,9 @@ A sequência efetivamente versionada neste checkout é:
 - `06` restringe o materializador de importação a chamadores autenticados;
 - `07` cria o bucket privado `import-media` e policies por usuário;
 - `08` torna o provisionamento de perfil idempotente, amplia `get_incremental_sync()` para as entidades com USN/tombstone já existentes, concede execução dos fluxos de worker necessários e impede escrita direta de badges pelo cliente.
+- `20261004120000` ativa a expansão SDD de forma compatível com o snapshot: tipos avançados de card e validação de resposta, preferências persistentes em `profiles` (o equivalente existente de `user_profiles`), exportação/partilha de decks, traduções, sessões de jogo, webhooks HMAC e hashes de API keys. O leaderboard existente permanece uma materialized view protegida, sem tabela duplicada.
 
-As migrações `06`–`08` e as duas migrations com timestamp desta entrega são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute a sequência completa em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
+As migrações `06`–`08` e as três migrations com timestamp desta entrega são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute a sequência completa em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
 
 ## 1. Objetivos do sistema
 
@@ -60,6 +62,8 @@ A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Um
 | Otimizador FSRS | Enfileiramento autenticado, claim, cálculo WASM e persistência de pesos | `supabase/functions/fsrs-optimize/` e `fsrs-optimize-worker/` |
 | Worker Anki | Leitura/escrita ZIP, `collection.anki2`, modelos, tags e mídia | `supabase/functions/anki-transfer/` e `_shared/anki-apkg.ts` |
 | Ingestão AI | Validação de fonte e criação de jobs para processamento assíncrono | `supabase/functions/ai-ingest/` |
+| Texto para fala | Cache determinístico em Storage e proxy autenticado do provedor TTS | `supabase/functions/tts/` |
+| Webhooks | Assinatura HMAC-SHA256 sem dependência externa | `supabase/functions/_shared/crypto.ts` |
 | Oclusão de imagem | Caixas percentuais, cartões Cloze e estado de estudo | RPC `create_image_occlusion_note()` |
 | Referências entre notas | Links direcionados entre notas do mesmo usuário | tabela `note_references` |
 | Sincronização | Entrega incremental de alterações e tombstones com cursor monotônico | `supabase/functions/sync/` |
@@ -454,6 +458,7 @@ A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo 
 | `fsrs-optimize-worker` | JWT válido com claim `role=service_role` | opcionalmente `run_id`, `limit` | lista de jobs processados | `SUPABASE_SERVICE_ROLE_KEY` e jobs 0018 |
 | `anki-transfer` | JWT de usuário | `action=import/export` e path ou deck | job concluído, contadores e path do `.apkg` | ZIP, SQLite WASM e Storage privado |
 | `ai-ingest` | JWT de usuário | `deck_id`, `source_type`, `content` ou `storage_path` | `job_id` em estado `queued` | fila `ai_ingestion_jobs` |
+| `tts` | JWT de usuário | `text` e `voiceId` por query string ou JSON | áudio MPEG com `X-Cache: HIT/MISS` | Storage `tts_cache` e `ELEVENLABS_API_KEY` |
 
 As funções de usuário usam `createUserClient(request)`: o JWT é encaminhado ao Supabase e o banco deriva `auth.uid()`, preservando RLS. Nenhuma função de usuário precisa de `service_role`. O worker FSRS usa credencial de serviço apenas no servidor e rejeita tokens com role diferente de `service_role`; manter `verify_jwt=true` impede chamadas sem JWT válido antes desse guard adicional.
 
@@ -818,7 +823,7 @@ O frontend também mantém `localStorage` e cookie como fallback offline. Quando
 
 ## SDD — capacidades liberadas para o usuário final
 
-A implementação atual expõe todas as funcionalidades previstas no SDD: estudo offline-first com outbox e retry, fila priorizada por exames, XP idempotente por sessão, leaderboard materializado, gamificação/badges, configurações completas de SRS/FSRS, CRUD de decks com hierarquia e restauração, importação transacional de CSV/Markdown/Quizlet/RemNote/URL, ingestão por IA com monitor de jobs, mídia/oclusão, busca semântica, Anki e colaboração.
+A implementação atual deste backend cobre os contratos versionados neste repositório: estudo/sync, fila priorizada por exames, XP idempotente por sessão, leaderboard materializado, gamificação/badges, configurações SRS/FSRS, decks, importação, ingestão de IA já implementada, mídia/oclusão, busca semântica, Anki e colaboração. Isso não significa que todas as propostas de produto do SDD estejam implementadas: onboarding, cobrança, limite de créditos e prévia de geração com reserva de créditos não são contratos deste backend nesta versão.
 
 ### Migrations adicionadas
 - `supabase/migrations/20261003220359_sdd_feature_exposure.sql`: habilita o refresh autenticado do leaderboard sem abrir escrita direta na projeção.
@@ -836,3 +841,114 @@ pnpm dev
 ```
 
 As Edge Functions continuam usando autenticação do usuário e RLS; nenhum bucket privado ou tabela de jobs é tornado público pela migration.
+
+
+## SDD de ativação — limite desta entrega e decisões de schema
+
+### O que mudou neste recorte
+
+O onboarding inicial, o resumo da meta no painel e o editor de preferências pertencem ao frontend e usam a API autenticada de Supabase Auth. **Esta branch do backend não adiciona nem altera tabelas, policies RLS, triggers, RPCs, Edge Functions, workers, secrets ou migrations.** Nenhuma migration foi enviada a projeto Supabase nem aplicada remotamente; o contrato implantável da seção 0 permanece inalterado.
+
+O único dado persistido pelo fluxo é um objeto pessoal opcional em `auth.users.user_metadata` via `auth.updateUser()`: objetivo, data-alvo, capacidade semanal, estado/rascunho e data de conclusão. O backend PostgreSQL não lê esses valores para agendar cartões, priorizar exames, liberar conteúdo ou calcular créditos. Usuários que já existiam antes desta versão não recebem flag retroativa nem são redirecionados.
+
+### Confiança e fronteiras de segurança
+
+`user_metadata` é editável pelo próprio titular e não serve como autoridade do servidor. Portanto:
+
+- não derivar papel, ownership, pagamento, entitlement, preço, limite de créditos ou autorização de `user_metadata`;
+- manter acesso real protegido por Auth, RLS e RPCs de domínio como hoje;
+- reservar claims de autorização controlados pelo servidor para `app_metadata` ou uma tabela/serviço de entitlement apropriado;
+- não persistir pergunta livre, conteúdo de estudo, resposta gerada por IA ou dados de cartão de pagamento neste objeto;
+- não emitir eventos analíticos com objetivo/data sem política de consentimento e retenção definida.
+
+Esta implementação não altera regras de `profiles_self`, `study_settings_self`, fila FSRS ou `deck_exams`; suas policies e grants atuais seguem sendo a referência.
+
+### Evolução futura: tabela própria de produto
+
+O SDD recomenda evoluir para tabela dedicada quando houver um alvo de staging explícito, geração canônica de tipos disponível e necessidade de consulta/retention/auditoria independente. Antes de qualquer mudança, criar proposta aditiva com, no mínimo:
+
+1. `user_id uuid primary key references auth.users(id) on delete cascade`;
+2. `goal` em enum/check de valores suportados; `target_date date null`; `weekly_capacity_minutes integer null` com faixa validada;
+3. estado de onboarding (`started_at`, `completed_at` ou equivalente) sem converter preferências em entitlement;
+4. RLS habilitado e policies autenticadas de `SELECT`/`INSERT`/`UPDATE` limitadas a `auth.uid() = user_id`; nada de leitura pública ou grant anônimo;
+5. nenhum campo duplicado de idioma/timezone; sem RPC privilegiada para dados que o titular atualiza;
+6. migration testada em Supabase de staging, teste isolado com dois usuários e usuário anônimo, geração de tipos a partir do schema aplicado e rollout do cliente coordenado;
+7. plano de migração/deleção para as chaves `flashi_product_preferences` e `flashi_onboarding_draft` de `user_metadata`, preservando a possibilidade de limpar ou recusar a preferência.
+
+Não aplicar essa tabela apenas para imitar um esquema futuro: enquanto o perfil é curto, opcional e controlado pelo usuário, a persistência Auth evita uma migração inativa e tipos inconsistentes. Se passar a dirigir contratos do servidor, telemetria, dashboards administrativos ou policy de produto, movê-la para storage relacional antes de depender dela.
+
+### Fora de escopo e critérios de desbloqueio
+
+Não foram implementados billing/preços, integração de PSP, webhooks, reservas/refunds de créditos, preview seguro de IA, quotas por usuário, analytics de ativação, painel administrativo ou alteração do worker `ai-ingest`. Esses itens dependem de decisão comercial/financeira, contrato de provedor, titular do entitlement, política de retenção e parâmetros de segurança. Não registrar tais features como “disponíveis” até serem implementadas e verificadas em staging.
+
+### Validação desta branch
+
+```bash
+python3 validate_sql.py
+python3 validate_snapshot.py
+python3 validate_readme.py
+python3 -m unittest discover -s tests -p 'test_contracts.py' -v
+```
+
+Os validadores de schema são guardrails do backend; os testes funcionais de onboarding ficam no frontend (`tests/onboarding-service.test.ts`). A verificação destas migrations/README não é prova de deploy remoto nem substitui teste Auth/RLS em projeto descartável.
+
+
+## 15. QA integrado desta execução — 04/10/2026
+
+O backend foi validado em conjunto com o frontend da branch `feat/sdd-activation`. A verificação local confirmou que a migration `20261004120000_sdd_activation_expansion.sql` já existe na árvore implantável e foi incluída no `EXPECTED` de `validate_snapshot.py`; antes desta correção o validador falhava por divergência entre a lista esperada e os arquivos reais do diretório `supabase/migrations`.
+
+A execução autenticada contra Supabase não foi simulada: a origem temporária do frontend foi testada sem uma sessão QA e, portanto, operações protegidas retornaram estado de autenticação ausente na interface. Nenhuma migration foi aplicada remotamente, nenhum worker foi disparado e nenhum dado de usuário foi criado ou alterado.
+
+A sequência recomendada de validação permanece:
+
+```bash
+python3 validate_readme.py
+python3 validate_snapshot.py
+python3 validate_sql.py
+python3 -m unittest discover -s tests -p 'test_contracts.py' -v
+```
+
+Para uma validação de integração completa, configure um projeto Supabase de staging, aplique a sequência implantável em ordem, crie uma conta QA e exercite Auth, RLS, RPCs e Edge Functions com isolamento entre dois usuários. A branch não inclui billing nem gateway de pagamento.
+
+## 16. Hardening SDD implementado nesta rodada
+
+A migration `20261004130000_sdd_mission_hardening.sql` adiciona uma máquina de estados persistida (`PENDING`, `VALIDATING`, `ACTIVE`, `SUSPENDED`, `FAILED`), idempotência transacional por usuário e fingerprint, tabelas de fronteira para entitlements/quotas e um rate limit atômico por usuário e escopo. A Edge Function `activation` valida os campos permitidos, exige `Idempotency-Key`, calcula SHA-256 do payload canônico, propaga `X-Request-Id` e rejeita reutilização de chave com payload diferente.
+
+Como este repositório é Supabase/Edge Functions e não NestJS/Prisma, o equivalente seguro foi implementado no PostgreSQL com RLS, RPCs `SECURITY INVOKER` e validação estrita na Edge Function. Redis/Redlock, `nestjs-cls`, Prisma Extensions e OpenTelemetry não são introduzidos artificialmente nesta stack; ficam como adaptadores de infraestrutura futuros, enquanto a garantia transacional atual permanece no banco.
+
+
+## Observabilidade completa do backend
+
+Todas as 12 Edge Functions (`activation`, `ai-ingest`, `ai-ingest-worker`, `anki-transfer`, `embeddings`, `fsrs-optimize`, `fsrs-optimize-worker`, `fsrs-review`, `import-deck`, `semantic-search`, `sync` e `tts`) passam por `withObservability`. O wrapper propaga `x-request-id`, adiciona o nome da função ao contexto, mede duração/status e emite `edge_request_completed`, `edge_request_failed` ou `edge_request_error`.
+
+### Cobertura
+
+- `handleError(error, request, functionName)` normaliza `VALIDATION_ERROR`, `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` e `INTERNAL_ERROR`, preserva request ID e captura exceções inesperadas no Sentry.
+- `createObservedFetch` cobre os clientes Supabase autenticados e administrativos, incluindo Auth, REST/Data, RPC e Storage.
+- Dependências externas instrumentadas: OpenAI embeddings, LLM de ingestão, ElevenLabs TTS, cache TTS e WASM FSRS, com host, método, status, duração e outcome, sem payload ou URL completa.
+- Funis de jobs cobertos: ingestão AI, otimização FSRS, importação Anki/decks, sincronização incremental e cache/geração TTS.
+- Eventos backend: `edge_request_completed`, `edge_request_failed`, `edge_request_error`, `dependency_request_completed`, `dependency_request_failed` e `activation_backend_completed`.
+
+### Privacidade e configuração
+
+O Sentry recebe exceções com `edge_function`, `request_id`, `error_class` e duração. O PostHog recebe somente nome da função/dependência, status, outcome, duração, código de erro e request ID anônimo. JWT, tokens, prompts, texto de estudo, conteúdo de cards/notas e payloads brutos nunca são enviados. Configure `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE`, `POSTHOG_PROJECT_TOKEN`, `POSTHOG_HOST` e `POSTHOG_SERVER_ENABLED` apenas no runtime das Edge Functions.
+
+O mapa operacional está em [`docs/observability-map.md`](docs/observability-map.md). O inventário geral de rotas, serviços frontend, RPCs, tabelas, jobs, dashboards, alertas e lacunas de produção está em [`../app-flashi/docs/observability-audit.md`](../app-flashi/docs/observability-audit.md) quando os dois repositórios estão lado a lado.
+
+Validação local/CI: `python3 validate_sql.py`, `python3 validate_snapshot.py`, `python3 validate_readme.py`, `python3 tests/test_contracts.py`, `deno check --config supabase/functions/deno.json supabase/functions/*/index.ts` e `deno test --allow-env --allow-net supabase/functions`.
+
+## SDD activation — provisionamento P0
+
+A migração `supabase/migrations/20261005010000_sdd_user_provisioning.sql` fecha a lacuna de provisionamento identificada no SDD. Cada usuário recebe, de forma idempotente e transacional, `activation_flows`, `learning_plans`, entitlements FREE (`study` e `basic_analytics`) e quotas mensais de `ai_generation` e `tts`. A mesma função é usada pelo trigger de novos usuários, por uma rotina de reparo para contas existentes e pelo `process_activation`.
+
+A ativação continua protegida por `Idempotency-Key`, fingerprint SHA-256, RLS e grants mínimos; `learning_plans` é a fonte oficial de preferências de produto. Nenhum conteúdo de cards, prompt, token ou PII é enviado ao analytics.
+
+### Validação local
+
+```bash
+python3 validate_sql.py
+python3 validate_snapshot.py
+python3 tests/test_contracts.py
+```
+
+Depois, em um projeto Supabase de desenvolvimento, aplique as migrações em ordem com `supabase db push` e valide uma conta nova e uma conta legada. O deploy da Edge Function é necessário para testar `POST /functions/v1/activation` em ambiente remoto.

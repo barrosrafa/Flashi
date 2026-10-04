@@ -14,6 +14,10 @@ export type Database = {
   }
   public: {
     Tables: {
+      learning_plans: { Row: { id: string; user_id: string; goal: string | null; target_date: string | null; weekly_minutes: number | null; created_at: string; updated_at: string }; Insert: { id?: string; user_id: string; goal?: string | null; target_date?: string | null; weekly_minutes?: number | null; created_at?: string; updated_at?: string }; Update: { id?: string; user_id?: string; goal?: string | null; target_date?: string | null; weekly_minutes?: number | null; created_at?: string; updated_at?: string }; Relationships: [] }
+      activation_flows: { Row: { id: string; user_id: string; status: string; errors: Json; last_request_id: string | null; activated_at: string | null; updated_at: string }; Insert: { id?: string; user_id: string; status?: string; errors?: Json; last_request_id?: string | null; activated_at?: string | null; updated_at?: string }; Update: { id?: string; user_id?: string; status?: string; errors?: Json; last_request_id?: string | null; activated_at?: string | null; updated_at?: string }; Relationships: [] }
+      activation_idempotency: { Row: { user_id: string; idempotency_key: string; fingerprint: string; status: string; request_id: string | null; response: Json | null; locked_until: string | null; updated_at: string }; Insert: { user_id: string; idempotency_key: string; fingerprint: string; status?: string; request_id?: string | null; response?: Json | null; locked_until?: string | null; updated_at?: string }; Update: { user_id?: string; idempotency_key?: string; fingerprint?: string; status?: string; request_id?: string | null; response?: Json | null; locked_until?: string | null; updated_at?: string }; Relationships: [] }
+      user_quotas: { Row: { user_id: string; quota: string; used: number; limit_value: number; updated_at: string }; Insert: { user_id: string; quota: string; used?: number; limit_value: number; updated_at?: string }; Update: { user_id?: string; quota?: string; used?: number; limit_value?: number; updated_at?: string }; Relationships: [] }
       ai_ingestion_jobs: {
         Row: {
           cards_generated_count: number
@@ -1521,6 +1525,8 @@ export type Database = {
       }
     }
     Functions: {
+      process_activation: { Args: { p_idempotency_key: string; p_fingerprint: string; p_request_id?: string; p_goal?: string; p_target_date?: string; p_weekly_minutes?: number }; Returns: Json }
+      consume_user_quota: { Args: { p_user_id: string; p_service: string; p_cost_units: number }; Returns: boolean }
       add_user_xp: {
         Args: { p_user_id: string; p_xp_amount: number }
         Returns: {

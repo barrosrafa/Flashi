@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   handleError,
@@ -316,7 +317,7 @@ async function exportDeck(
   return { bytes, totalCards: cards.length, storagePath };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("anki-transfer", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
   if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
@@ -389,6 +390,6 @@ Deno.serve(async (request) => {
     if (client && jobId && userId) {
       await client.from("anki_transfer_jobs").update({ status: "failed", error_message: error instanceof Error ? error.message : "Unknown transfer error", completed_at: new Date().toISOString() }).eq("id", jobId).eq("user_id", userId);
     }
-    return handleError(error, request);
+    return handleError(error, request, "anki-transfer");
   }
-});
+}));
