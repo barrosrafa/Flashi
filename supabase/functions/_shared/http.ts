@@ -1,3 +1,5 @@
+import { captureException } from "./observability.ts";
+
 function parseAllowedOrigins(value: string | undefined): string[] {
   return (value ?? "")
     .split(",")
@@ -133,7 +135,8 @@ export function handleError(error: unknown, request: Request): Response {
   if (error instanceof RequestError) {
     return jsonResponse(request, { error: error.message, code: error.code, request_id: requestId }, error.status);
   }
-  console.error(JSON.stringify({ request_id: requestId, error }));
+  captureException(error, { functionName: "unknown", requestId, tags: { error_class: error instanceof Error ? error.name : "unknown" } });
+  console.error(JSON.stringify({ request_id: requestId, error: error instanceof Error ? { name: error.name, message: error.message } : "unknown" }));
   return jsonResponse(request, { error: "Internal server error", code: "INTERNAL_ERROR", request_id: requestId }, 500);
 }
 

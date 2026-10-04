@@ -155,7 +155,7 @@ class FlashiContractsTest(unittest.TestCase):
             "20261003220443_leaderboard_rpc_and_indexes.sql",
             "20261004023000_ai_ingestion_worker_cron.sql",
             "20261004120000_sdd_activation_expansion.sql",
-            "20261004130000_sdd_mission_hardening.sql",
+            "20261004130000_sdd_mission_hardening.sql", "20261005000000_sdd_core_hardening.sql",
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
@@ -287,6 +287,13 @@ class FlashiContractsTest(unittest.TestCase):
                 self.assertIsNone(re.search(r"ghp_[A-Za-z0-9]{20,}", text))
                 self.assertIsNone(re.search(r"github_pat_[A-Za-z0-9_]{20,}", text))
                 self.assertNotIn("service_" + "role_key=", text)
+
+    def test_sdd_activation_observability_contracts(self):
+        migration = (ROOT / "supabase/migrations/20261005000000_sdd_core_hardening.sql").read_text(encoding="utf-8")
+        observability = (ROOT / "supabase/functions/_shared/observability.ts").read_text(encoding="utf-8")
+        activation = (ROOT / "supabase/functions/activation/index.ts").read_text(encoding="utf-8")
+        for fragment in ("learning_plans", "process_activation(text, text, text, text, date, integer)"): self.assertIn(fragment, migration)
+        for fragment in ("capturePostHogEvent", "captureException", "request_id", "sendDefaultPii: false"): self.assertIn(fragment, observability + activation)
 
 
 if __name__ == "__main__":
