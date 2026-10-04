@@ -48,6 +48,9 @@ Deno.serve(async (request) => {
       p_idempotency_key: idempotencyKey,
       p_fingerprint: fingerprint,
       p_request_id: requestId,
+      p_goal: body.goal ?? null,
+      p_target_date: body.target_date ?? null,
+      p_weekly_minutes: body.weekly_minutes ?? null,
     });
     if (error) {
       const message = error.message ?? "Activation failed";

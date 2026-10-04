@@ -25,6 +25,7 @@ EXPECTED = [
     "20261004023000_ai_ingestion_worker_cron.sql",
     "20261004120000_sdd_activation_expansion.sql",
     "20261004130000_sdd_mission_hardening.sql",
+    "20261005000000_sdd_core_hardening.sql",
 ]
 
 

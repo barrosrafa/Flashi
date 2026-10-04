@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { load } from "npm:cheerio@1.0.0";
+import { corsHeaders, handleCorsPreflight, secureDeterministicFetch } from "../_shared/security.ts";
 
 type Job = { job_id: string; user_id: string; deck_id: string; source_type: string; source_reference: string | null };
 type Card = { fields: Record<string, string>; card_kind: "basic" | "reverse" | "cloze"; card_ordinal: number; cloze_ordinal?: number | null };
@@ -7,6 +8,7 @@ type Note = { fields: Record<string, string>; cards: Card[] };
 
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
 const MAX_SOURCE_CHARS = 250_000;
+const MAX_WEB_BYTES = 600_000;
 const BUCKET = Deno.env.get("INGESTION_BUCKET") ?? "import-media";
 
 function required(name: string): string { const value = Deno.env.get(name); if (!value) throw new Error(`Missing ${name}`); return value; }
@@ -35,8 +37,12 @@ async function sourceText(job: Job, client: SupabaseClient): Promise<string> {
   const ref = job.source_reference ?? "";
   if (job.source_type === "raw_text_block") return ref.slice(0, MAX_SOURCE_CHARS);
   if (job.source_type === "web_page") {
-    const response = await fetch(ref); if (!response.ok) throw new Error(`Web source returned HTTP ${response.status}`);
-    const html = await response.text(); const $ = load(html); $("script,style,noscript").remove();
+    const response = await secureDeterministicFetch(ref); if (!response.ok) throw new Error(`Web source returned HTTP ${response.status}`);
+    const contentLength = Number(response.headers.get("content-length") ?? "0");
+    if (contentLength > MAX_WEB_BYTES) throw new Error("Web source exceeds the memory limit");
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_WEB_BYTES) throw new Error("Web source exceeds the memory limit");
+    const html = new TextDecoder().decode(buffer); const $ = load(html); $("script,style,noscript").remove();
     return $("body").text().replace(/\s+/g, " ").trim().slice(0, MAX_SOURCE_CHARS);
   }
   if (job.source_type === "youtube_url") {
@@ -68,6 +74,8 @@ async function generateNotes(text: string): Promise<Note[]> {
 }
 async function processOne(client: SupabaseClient, job: Job): Promise<void> {
   try {
+    const { data: allowed, error: quotaError } = await client.rpc("consume_user_quota", { p_user_id: job.user_id, p_service: "ai_ingest", p_cost_units: 1 });
+    if (quotaError || allowed !== true) throw new Error("QUOTA_EXCEEDED");
     const notes = await generateNotes(await sourceText(job, client));
     const { error } = await client.rpc("materialize_ai_ingestion_batch", { p_job_id: job.job_id, p_user_id: job.user_id, p_deck_id: job.deck_id, p_notes: notes });
     if (error) throw new Error(error.message);
@@ -83,12 +91,20 @@ function jwtRole(request: Request): string | null {
   try { const payload = JSON.parse(atob(token.split(".")[1] ?? "")) as { role?: string }; return payload.role ?? null; } catch { return null; }
 }
 Deno.serve(async (request) => {
-  if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
-  if (jwtRole(request) !== "service_role" || request.headers.get("x-worker-secret") !== Deno.env.get("INGESTION_WORKER_SECRET")) return new Response("Unauthorized", { status: 401 });
+  const preflight = handleCorsPreflight(request);
+  if (preflight) return preflight;
+  if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+  if (jwtRole(request) !== "service_role" || request.headers.get("x-worker-secret") !== Deno.env.get("INGESTION_WORKER_SECRET")) return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   const client = admin();
   const { data, error } = await client.rpc("claim_ai_ingestion_job");
-  if (error) return Response.json({ error: "claim failed" }, { status: 500 });
-  if (!data?.[0]) return Response.json({ status: "idle" });
-  try { await processOne(client, data[0] as Job); return Response.json({ status: "completed", job_id: data[0].job_id }); }
-  catch { return Response.json({ status: "failed", job_id: data[0].job_id }, { status: 500 }); }
+  if (error) return new Response(JSON.stringify({ error: "claim failed" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  if (!data?.[0]) return new Response(JSON.stringify({ status: "idle" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  const job = data[0] as Job;
+  const task = processOne(client, job);
+  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+    EdgeRuntime.waitUntil(task);
+    return new Response(JSON.stringify({ status: "accepted", job_id: job.job_id }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+  try { await task; return new Response(JSON.stringify({ status: "completed", job_id: job.job_id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
+  catch { return new Response(JSON.stringify({ status: "failed", job_id: job.job_id }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
 });
