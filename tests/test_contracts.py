@@ -156,6 +156,7 @@ class FlashiContractsTest(unittest.TestCase):
             "20261004023000_ai_ingestion_worker_cron.sql",
             "20261004120000_sdd_activation_expansion.sql",
             "20261004130000_sdd_mission_hardening.sql", "20261005000000_sdd_core_hardening.sql",
+            "20261005010000_sdd_user_provisioning.sql",
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)

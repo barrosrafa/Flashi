@@ -920,3 +920,19 @@ Como este repositório é Supabase/Edge Functions e não NestJS/Prisma, o equiva
 ## Observabilidade da activation
 
 A Edge Function `activation` registra `request_id` no Sentry e envia ao PostHog apenas status, duração e idempotência. O envio é best effort; JWT, payload bruto e dados de estudo não são enviados. Variáveis opcionais: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `POSTHOG_PROJECT_TOKEN`, `POSTHOG_HOST` e `POSTHOG_SERVER_ENABLED`. Valide com `python -m unittest discover -s tests`; com Deno, `deno test --allow-env --allow-net supabase/functions`.
+
+## SDD activation — provisionamento P0
+
+A migração `supabase/migrations/20261005010000_sdd_user_provisioning.sql` fecha a lacuna de provisionamento identificada no SDD. Cada usuário recebe, de forma idempotente e transacional, `activation_flows`, `learning_plans`, entitlements FREE (`study` e `basic_analytics`) e quotas mensais de `ai_generation` e `tts`. A mesma função é usada pelo trigger de novos usuários, por uma rotina de reparo para contas existentes e pelo `process_activation`.
+
+A ativação continua protegida por `Idempotency-Key`, fingerprint SHA-256, RLS e grants mínimos; `learning_plans` é a fonte oficial de preferências de produto. Nenhum conteúdo de cards, prompt, token ou PII é enviado ao analytics.
+
+### Validação local
+
+```bash
+python3 validate_sql.py
+python3 validate_snapshot.py
+python3 tests/test_contracts.py
+```
+
+Depois, em um projeto Supabase de desenvolvimento, aplique as migrações em ordem com `supabase db push` e valide uma conta nova e uma conta legada. O deploy da Edge Function é necessário para testar `POST /functions/v1/activation` em ambiente remoto.
