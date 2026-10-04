@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   handleError,
@@ -15,7 +16,7 @@ const MAX_PDF_BYTES = 15 * 1024 * 1024;
 const MAX_REFERENCE_LENGTH = 2_000;
 const ALLOWED_SOURCE_TYPES = new Set(["pdf_document", "youtube_url", "raw_text_block", "web_page"]);
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("ai-ingest", async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -67,6 +68,6 @@ Deno.serve(async (request) => {
     if (error) throw new Error(`job creation failed: ${error.message}`);
     return jsonResponse(request, { job_id: job.id, status: job.status, created_at: job.created_at });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "ai-ingest");
   }
-});
+}));

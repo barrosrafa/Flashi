@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   fsrs,
   Rating,
@@ -126,7 +127,7 @@ function buildParameters(settings: Record<string, unknown> | null): Partial<FSRS
   };
 }
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("fsrs-review", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
 
@@ -236,6 +237,6 @@ Deno.serve(async (request) => {
       difficulty: nextCard.difficulty,
     });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "fsrs-review");
   }
-});
+}));

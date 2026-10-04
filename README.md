@@ -917,9 +917,25 @@ A migration `20261004130000_sdd_mission_hardening.sql` adiciona uma máquina de 
 Como este repositório é Supabase/Edge Functions e não NestJS/Prisma, o equivalente seguro foi implementado no PostgreSQL com RLS, RPCs `SECURITY INVOKER` e validação estrita na Edge Function. Redis/Redlock, `nestjs-cls`, Prisma Extensions e OpenTelemetry não são introduzidos artificialmente nesta stack; ficam como adaptadores de infraestrutura futuros, enquanto a garantia transacional atual permanece no banco.
 
 
-## Observabilidade da activation
+## Observabilidade completa do backend
 
-A Edge Function `activation` registra `request_id` no Sentry e envia ao PostHog apenas status, duração e idempotência. O envio é best effort; JWT, payload bruto e dados de estudo não são enviados. Variáveis opcionais: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `POSTHOG_PROJECT_TOKEN`, `POSTHOG_HOST` e `POSTHOG_SERVER_ENABLED`. Valide com `python -m unittest discover -s tests`; com Deno, `deno test --allow-env --allow-net supabase/functions`.
+Todas as 12 Edge Functions (`activation`, `ai-ingest`, `ai-ingest-worker`, `anki-transfer`, `embeddings`, `fsrs-optimize`, `fsrs-optimize-worker`, `fsrs-review`, `import-deck`, `semantic-search`, `sync` e `tts`) passam por `withObservability`. O wrapper propaga `x-request-id`, adiciona o nome da função ao contexto, mede duração/status e emite `edge_request_completed`, `edge_request_failed` ou `edge_request_error`.
+
+### Cobertura
+
+- `handleError(error, request, functionName)` normaliza `VALIDATION_ERROR`, `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED` e `INTERNAL_ERROR`, preserva request ID e captura exceções inesperadas no Sentry.
+- `createObservedFetch` cobre os clientes Supabase autenticados e administrativos, incluindo Auth, REST/Data, RPC e Storage.
+- Dependências externas instrumentadas: OpenAI embeddings, LLM de ingestão, ElevenLabs TTS, cache TTS e WASM FSRS, com host, método, status, duração e outcome, sem payload ou URL completa.
+- Funis de jobs cobertos: ingestão AI, otimização FSRS, importação Anki/decks, sincronização incremental e cache/geração TTS.
+- Eventos backend: `edge_request_completed`, `edge_request_failed`, `edge_request_error`, `dependency_request_completed`, `dependency_request_failed` e `activation_backend_completed`.
+
+### Privacidade e configuração
+
+O Sentry recebe exceções com `edge_function`, `request_id`, `error_class` e duração. O PostHog recebe somente nome da função/dependência, status, outcome, duração, código de erro e request ID anônimo. JWT, tokens, prompts, texto de estudo, conteúdo de cards/notas e payloads brutos nunca são enviados. Configure `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_TRACES_SAMPLE_RATE`, `POSTHOG_PROJECT_TOKEN`, `POSTHOG_HOST` e `POSTHOG_SERVER_ENABLED` apenas no runtime das Edge Functions.
+
+O mapa operacional está em [`docs/observability-map.md`](docs/observability-map.md). O inventário geral de rotas, serviços frontend, RPCs, tabelas, jobs, dashboards, alertas e lacunas de produção está em [`../app-flashi/docs/observability-audit.md`](../app-flashi/docs/observability-audit.md) quando os dois repositórios estão lado a lado.
+
+Validação local/CI: `python3 validate_sql.py`, `python3 validate_snapshot.py`, `python3 validate_readme.py`, `python3 tests/test_contracts.py`, `deno check --config supabase/functions/deno.json supabase/functions/*/index.ts` e `deno test --allow-env --allow-net supabase/functions`.
 
 ## SDD activation — provisionamento P0
 

@@ -1,3 +1,4 @@
+import { createObservedFetch, fetchWithObservability, withObservability } from "../_shared/observability.ts";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { load } from "npm:cheerio@1.0.0";
 import { corsHeaders, handleCorsPreflight, secureDeterministicFetch } from "../_shared/security.ts";
@@ -12,7 +13,7 @@ const MAX_WEB_BYTES = 600_000;
 const BUCKET = Deno.env.get("INGESTION_BUCKET") ?? "import-media";
 
 function required(name: string): string { const value = Deno.env.get(name); if (!value) throw new Error(`Missing ${name}`); return value; }
-function admin(): SupabaseClient { return createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false } }); }
+function admin(request: Request): SupabaseClient { return createClient(required("SUPABASE_URL"), required("SUPABASE_SERVICE_ROLE_KEY"), { global: { fetch: createObservedFetch({ dependency: "supabase-admin", functionName: "ai-ingest-worker", requestId: request.headers.get("x-request-id") ?? undefined }) }, auth: { persistSession: false } }); }
 function safeStoragePath(path: string, userId: string): void {
   if (!path || path.startsWith("/") || path.includes("..") || !path.startsWith(`${userId}/`)) throw new Error("Invalid storage path");
 }
@@ -62,11 +63,11 @@ async function sourceText(job: Job, client: SupabaseClient): Promise<string> {
 async function generateNotes(text: string): Promise<Note[]> {
   const key = required("OPENAI_API_KEY");
   const base = Deno.env.get("OPENAI_API_BASE") ?? "https://api.openai.com/v1";
-  const response = await fetch(`${base}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({
+  const response = await fetchWithObservability(`${base}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({
     model: Deno.env.get("INGESTION_MODEL") ?? "gpt-4o-mini", temperature: 0,
     messages: [{ role: "system", content: "Transforme o texto em notas de estudo. Responda apenas no schema fornecido; crie campos e cartões úteis e não invente conteúdo." }, { role: "user", content: text }],
     response_format: { type: "json_schema", json_schema: { name: "flashi_ingestion", strict: true, schema: { type: "object", additionalProperties: false, properties: { notes: { type: "array", items: { type: "object", additionalProperties: false, properties: { fields: { type: "object", additionalProperties: { type: "string" } }, cards: { type: "array", items: { type: "object", additionalProperties: false, properties: { fields: { type: "object", additionalProperties: { type: "string" } }, card_kind: { type: "string", enum: ["basic", "reverse", "cloze"] }, card_ordinal: { type: "integer", minimum: 0 }, cloze_ordinal: { type: ["integer", "null"] } }, required: ["fields", "card_kind", "card_ordinal", "cloze_ordinal"] } } }, required: ["fields", "cards"] } } }, required: ["notes"] } } },
-  }) });
+  }) }, { dependency: "llm-ingestion" });
   if (!response.ok) throw new Error(`LLM provider returned HTTP ${response.status}`);
   const body = await response.json(); const content = body.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("LLM returned an invalid contract");
@@ -90,12 +91,12 @@ function jwtRole(request: Request): string | null {
   if (!token) return null;
   try { const payload = JSON.parse(atob(token.split(".")[1] ?? "")) as { role?: string }; return payload.role ?? null; } catch { return null; }
 }
-Deno.serve(async (request) => {
+Deno.serve(withObservability("ai-ingest-worker", async (request) => {
   const preflight = handleCorsPreflight(request);
   if (preflight) return preflight;
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: corsHeaders });
   if (jwtRole(request) !== "service_role" || request.headers.get("x-worker-secret") !== Deno.env.get("INGESTION_WORKER_SECRET")) return new Response("Unauthorized", { status: 401, headers: corsHeaders });
-  const client = admin();
+  const client = admin(request);
   const { data, error } = await client.rpc("claim_ai_ingestion_job");
   if (error) return new Response(JSON.stringify({ error: "claim failed" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   if (!data?.[0]) return new Response(JSON.stringify({ status: "idle" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -107,4 +108,4 @@ Deno.serve(async (request) => {
   }
   try { await task; return new Response(JSON.stringify({ status: "completed", job_id: job.job_id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
   catch { return new Response(JSON.stringify({ status: "failed", job_id: job.job_id }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
-});
+}));

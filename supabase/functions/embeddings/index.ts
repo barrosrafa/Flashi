@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   handleError,
@@ -31,7 +32,7 @@ function flattenText(value: unknown, path = ""): string[] {
 
 import { DIMENSIONS, MODEL, requestEmbedding } from "../_shared/embeddings.ts";
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("embeddings", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
 
@@ -94,6 +95,6 @@ Deno.serve(async (request) => {
       skipped: false,
     });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "embeddings");
   }
-});
+}));

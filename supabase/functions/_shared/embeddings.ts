@@ -1,4 +1,5 @@
 import { RequestError } from "./http.ts";
+import { fetchWithObservability } from "./observability.ts";
 
 export const MODEL = Deno.env.get("EMBEDDING_MODEL") ?? "text-embedding-3-small";
 export const DIMENSIONS = 1536;
@@ -13,12 +14,12 @@ function requiredEnv(name: string): string {
 export async function requestEmbedding(input: string): Promise<number[]> {
   let lastStatus = 0;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const response = await fetch("https://api.openai.com/v1/embeddings", {
+    const response = await fetchWithObservability("https://api.openai.com/v1/embeddings", {
       method: "POST",
       headers: { Authorization: `Bearer ${requiredEnv("OPENAI_API_KEY")}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: MODEL, input, encoding_format: "float" }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }, { dependency: "openai-embeddings" });
     lastStatus = response.status;
     if (response.ok) {
       const payload = await response.json() as { data?: Array<{ embedding?: unknown }> };

@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
   boundedInteger,
@@ -33,7 +34,7 @@ function maxReturnedUsn(rows: Array<{ usn?: number | string }>, fallback: string
   return max.toString();
 }
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("sync", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
 
@@ -67,6 +68,6 @@ Deno.serve(async (request) => {
       cursor_commit_rule: "apply_all_then_commit_next_usn",
     });
   } catch (error) {
-    return handleError(error, request);
+    return handleError(error, request, "sync");
   }
-});
+}));

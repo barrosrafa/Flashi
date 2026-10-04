@@ -1,3 +1,4 @@
+import { withObservability } from "../_shared/observability.ts";
 import {
   getRequestId,
   handleCors,
@@ -14,7 +15,7 @@ import { captureException, capturePostHogEvent, setRequestContext } from "../_sh
 
 const ALLOWED_FIELDS = new Set(["goal", "target_date", "weekly_minutes"]);
 
-Deno.serve(async (request) => {
+Deno.serve(withObservability("activation", async (request) => {
   const corsResponse = handleCors(request);
   if (corsResponse) return corsResponse;
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -74,6 +75,6 @@ Deno.serve(async (request) => {
     return jsonResponse(request, result, 200, { "X-Request-Id": requestId });
   } catch (error) {
     captureException(error, { functionName: "activation", requestId, userId, tags: { area: "activation" }, extra: { duration_ms: Math.round(performance.now() - startedAt) } });
-    return handleError(error, request);
+    return handleError(error, request, "activation");
   }
-});
+}));

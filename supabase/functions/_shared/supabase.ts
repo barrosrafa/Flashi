@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { RequestError } from "./http.ts";
+import { createObservedFetch } from "./observability.ts";
 
 function requiredEnv(name: string): string {
   const value = Deno.env.get(name);
@@ -12,6 +13,8 @@ export function createUserClient(request: Request): SupabaseClient {
   if (!authorization?.startsWith("Bearer ")) {
     throw new RequestError("Authentication is required", 401);
   }
+  const requestId = request.headers.get("x-request-id")?.trim() || crypto.randomUUID();
+  const functionName = request.headers.get("x-function-name")?.trim() || "edge-function";
 
   return createClient(
     requiredEnv("SUPABASE_URL"),
@@ -19,6 +22,7 @@ export function createUserClient(request: Request): SupabaseClient {
     {
       global: {
         headers: { Authorization: authorization },
+        fetch: createObservedFetch({ dependency: "supabase", functionName, requestId }),
       },
       auth: {
         persistSession: false,
