@@ -6,7 +6,7 @@ O **Flashi** é a camada de dados de uma plataforma de flashcards com suporte a 
 
 Este repositório contém o **schema PostgreSQL/Supabase**, as migrações incrementais, as políticas RLS, as funções transacionais, as Edge Functions de sincronização, revisão, embeddings, busca semântica, otimização FSRS e transferência Anki, além de validadores locais de sintaxe, tipos e contratos. O frontend, o materializador de templates e o adaptador MCP continuam sendo componentes externos que consumirão esses contratos.
 
-> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql`, `08_sync_worker_and_contract_hardening.sql`, `20261003220359_sdd_feature_exposure.sql` e `20261003220443_leaderboard_rpc_and_indexes.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker` e `import-deck`. A busca semântica depende de `OPENAI_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
+> **Estado atual da branch `v2`:** a árvore implantável é o snapshot `supabase/migrations/00_extensions.sql` até `05_workers_storage_realtime.sql`, seguido pelas migrações de hardening `06_harden_public_materializer.sql`, `07_import_media_bucket.sql`, `08_sync_worker_and_contract_hardening.sql`, `20261003220359_sdd_feature_exposure.sql`, `20261003220443_leaderboard_rpc_and_indexes.sql` e `20261004120000_sdd_activation_expansion.sql`. As migrações históricas `0001`–`0026` ficam em `supabase/migrations_archive/` e servem como referência, não como uma segunda sequência a ser aplicada sobre o snapshot. No projeto Supabase `flashi`, estão publicadas com JWT obrigatório as funções `sync`, `fsrs-review`, `embeddings`, `semantic-search`, `fsrs-optimize`, `fsrs-optimize-worker`, `anki-transfer`, `ai-ingest`, `ai-ingest-worker`, `import-deck` e, quando o secret do provedor está configurado, `tts`. A busca semântica depende de `OPENAI_API_KEY`; TTS depende de `ELEVENLABS_API_KEY`; os workers protegidos exigem credenciais de serviço apenas no ambiente de execução; e a compatibilidade `.apkg` é deliberadamente limitada ao subconjunto implementado e testado. O advisor de segurança remoto foi verificado após o hardening.
 
 A branch `v2` acrescenta um snapshot estrutural em seis ficheiros para ambientes novos, cinco migrações incrementais de hardening e preserva o histórico em `supabase/migrations_archive/`. Não misture a numeração histórica com a sequência implantável atual durante um deploy.
 
@@ -26,6 +26,7 @@ A sequência efetivamente versionada neste checkout é:
   -> 08_sync_worker_and_contract_hardening.sql
   -> 20261003220359_sdd_feature_exposure.sql
   -> 20261003220443_leaderboard_rpc_and_indexes.sql
+  -> 20261004120000_sdd_activation_expansion.sql
 ```
 
 - `00` centraliza extensões;
@@ -37,8 +38,9 @@ A sequência efetivamente versionada neste checkout é:
 - `06` restringe o materializador de importação a chamadores autenticados;
 - `07` cria o bucket privado `import-media` e policies por usuário;
 - `08` torna o provisionamento de perfil idempotente, amplia `get_incremental_sync()` para as entidades com USN/tombstone já existentes, concede execução dos fluxos de worker necessários e impede escrita direta de badges pelo cliente.
+- `20261004120000` ativa a expansão SDD de forma compatível com o snapshot: tipos avançados de card e validação de resposta, preferências persistentes em `profiles` (o equivalente existente de `user_profiles`), exportação/partilha de decks, traduções, sessões de jogo, webhooks HMAC e hashes de API keys. O leaderboard existente permanece uma materialized view protegida, sem tabela duplicada.
 
-As migrações `06`–`08` e as duas migrations com timestamp desta entrega são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute a sequência completa em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
+As migrações `06`–`08` e as três migrations com timestamp desta entrega são parte do deploy atual, não documentação futura. Em um projeto já aplicado até `05`, execute a sequência completa em ordem; em uma base histórica, compare o schema antes de aplicar hardenings e não aplique a série histórica por cima do snapshot.
 
 ## 1. Objetivos do sistema
 
@@ -60,6 +62,8 @@ A decisão central é separar **conteúdo** de **progresso de aprendizagem**. Um
 | Otimizador FSRS | Enfileiramento autenticado, claim, cálculo WASM e persistência de pesos | `supabase/functions/fsrs-optimize/` e `fsrs-optimize-worker/` |
 | Worker Anki | Leitura/escrita ZIP, `collection.anki2`, modelos, tags e mídia | `supabase/functions/anki-transfer/` e `_shared/anki-apkg.ts` |
 | Ingestão AI | Validação de fonte e criação de jobs para processamento assíncrono | `supabase/functions/ai-ingest/` |
+| Texto para fala | Cache determinístico em Storage e proxy autenticado do provedor TTS | `supabase/functions/tts/` |
+| Webhooks | Assinatura HMAC-SHA256 sem dependência externa | `supabase/functions/_shared/crypto.ts` |
 | Oclusão de imagem | Caixas percentuais, cartões Cloze e estado de estudo | RPC `create_image_occlusion_note()` |
 | Referências entre notas | Links direcionados entre notas do mesmo usuário | tabela `note_references` |
 | Sincronização | Entrega incremental de alterações e tombstones com cursor monotônico | `supabase/functions/sync/` |
@@ -454,6 +458,7 @@ A pasta `supabase/functions/` usa TypeScript no runtime Deno, conforme o modelo 
 | `fsrs-optimize-worker` | JWT válido com claim `role=service_role` | opcionalmente `run_id`, `limit` | lista de jobs processados | `SUPABASE_SERVICE_ROLE_KEY` e jobs 0018 |
 | `anki-transfer` | JWT de usuário | `action=import/export` e path ou deck | job concluído, contadores e path do `.apkg` | ZIP, SQLite WASM e Storage privado |
 | `ai-ingest` | JWT de usuário | `deck_id`, `source_type`, `content` ou `storage_path` | `job_id` em estado `queued` | fila `ai_ingestion_jobs` |
+| `tts` | JWT de usuário | `text` e `voiceId` por query string ou JSON | áudio MPEG com `X-Cache: HIT/MISS` | Storage `tts_cache` e `ELEVENLABS_API_KEY` |
 
 As funções de usuário usam `createUserClient(request)`: o JWT é encaminhado ao Supabase e o banco deriva `auth.uid()`, preservando RLS. Nenhuma função de usuário precisa de `service_role`. O worker FSRS usa credencial de serviço apenas no servidor e rejeita tokens com role diferente de `service_role`; manter `verify_jwt=true` impede chamadas sem JWT válido antes desse guard adicional.
 

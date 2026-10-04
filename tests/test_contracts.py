@@ -154,6 +154,7 @@ class FlashiContractsTest(unittest.TestCase):
             "20261003220359_sdd_feature_exposure.sql",
             "20261003220443_leaderboard_rpc_and_indexes.sql",
             "20261004023000_ai_ingestion_worker_cron.sql",
+            "20261004120000_sdd_activation_expansion.sql",
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
@@ -163,6 +164,21 @@ class FlashiContractsTest(unittest.TestCase):
         combined = "\n".join((snapshot_dir / name).read_text(encoding="utf-8").lower() for name in expected)
         for fragment in ("create table if not exists public.notes", "create table if not exists public.cards", "enable row level security", "search_path"):
             self.assertIn(fragment, combined)
+
+    def test_sdd_activation_expansion_contracts(self):
+        migration = (ROOT / "supabase/migrations/20261004120000_sdd_activation_expansion.sql").read_text(encoding="utf-8").lower()
+        for fragment in (
+            "type_answer_validation", "image_occlusion", "share_slug", "card_translations",
+            "game_sessions", "webhook_subscriptions", "api_keys", "hmac-sha256",
+            "enable row level security", "profiles_theme_check",
+        ):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, migration)
+        tts = (ROOT / "supabase/functions/tts/index.ts").read_text(encoding="utf-8")
+        for fragment in ("createUserClient", "X-Cache", "waitUntil", "ELEVENLABS_API_KEY", "PROVIDER_UNAVAILABLE"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, tts)
+        crypto = (ROOT / "supabase/functions/_shared/crypto.ts").read_text(encoding="utf-8")
+        for fragment in ("signWebhookPayload", "HMAC", "SHA-256", "crypto.subtle.sign"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, crypto)
 
     def test_ai_ingestion_scheduler_is_opt_in_and_uses_vault_secrets(self):
         migration = (ROOT / "0027_ai_ingestion_worker_cron.sql").read_text(encoding="utf-8").lower()
