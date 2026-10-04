@@ -891,3 +891,21 @@ python3 -m unittest discover -s tests -p 'test_contracts.py' -v
 ```
 
 Os validadores de schema são guardrails do backend; os testes funcionais de onboarding ficam no frontend (`tests/onboarding-service.test.ts`). A verificação destas migrations/README não é prova de deploy remoto nem substitui teste Auth/RLS em projeto descartável.
+
+
+## 15. QA integrado desta execução — 04/10/2026
+
+O backend foi validado em conjunto com o frontend da branch `feat/sdd-activation`. A verificação local confirmou que a migration `20261004120000_sdd_activation_expansion.sql` já existe na árvore implantável e foi incluída no `EXPECTED` de `validate_snapshot.py`; antes desta correção o validador falhava por divergência entre a lista esperada e os arquivos reais do diretório `supabase/migrations`.
+
+A execução autenticada contra Supabase não foi simulada: a origem temporária do frontend foi testada sem uma sessão QA e, portanto, operações protegidas retornaram estado de autenticação ausente na interface. Nenhuma migration foi aplicada remotamente, nenhum worker foi disparado e nenhum dado de usuário foi criado ou alterado.
+
+A sequência recomendada de validação permanece:
+
+```bash
+python3 validate_readme.py
+python3 validate_snapshot.py
+python3 validate_sql.py
+python3 -m unittest discover -s tests -p 'test_contracts.py' -v
+```
+
+Para uma validação de integração completa, configure um projeto Supabase de staging, aplique a sequência implantável em ordem, crie uma conta QA e exercite Auth, RLS, RPCs e Edge Functions com isolamento entre dois usuários. A branch não inclui billing nem gateway de pagamento.
