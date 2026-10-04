@@ -17,8 +17,15 @@ As funções desta pasta são TypeScript executado no runtime Deno das Supabase 
 | `import-deck` | Importação de arquivo ou URL HTTPS no servidor (CSV, Markdown, Quizlet, RemNote) | usuário |
 | `ai-ingest` | Validar fonte e criar jobs de ingestão por IA | usuário | publicada; worker de processamento é separado |
 | `tts` | Sintetizar fala com cache determinístico em Storage | usuário | requer `ELEVENLABS_API_KEY`; cache é assíncrono |
+| `activation` | Validar e processar ativação com fingerprint, idempotência e request ID | usuário | migration `20261004130000_sdd_mission_hardening` |
 
 As funções de usuário devem permanecer com `verify_jwt=true`. `ai-ingest-worker` usa `verify_jwt=false` no gateway porque valida no corpo o JWT `service_role` e o header secreto `x-worker-secret`; não deve ser chamado pelo browser.
+
+## Ativação SDD
+
+`POST /functions/v1/activation` exige JWT de usuário e o header `Idempotency-Key`. O corpo aceita somente `goal`, `target_date` e `weekly_minutes`; propriedades extras são rejeitadas com `422 BOPLA_REJECTED`. A função calcula um fingerprint SHA-256, propaga `X-Request-Id` e chama `public.process_activation()`. Uma repetição com a mesma chave e payload retorna o resultado persistido; a mesma chave com outro payload retorna `422`, e uma operação concorrente retorna `409`.
+
+A migration `20261004130000_sdd_mission_hardening.sql` cria `activation_flows`, `activation_idempotency`, `user_entitlements`, `user_quotas` e o contador atômico `consume_user_rate_limit()`, todos protegidos por RLS ou grants mínimos. Entitlements e quotas são fronteiras preparadas para billing futuro e não liberam cobrança nem gateway.
 
 ## Variáveis e secrets
 
@@ -161,6 +168,7 @@ supabase functions deploy ai-ingest
 supabase functions deploy ai-ingest-worker
 supabase functions deploy import-deck
 supabase functions deploy tts
+supabase functions deploy activation
 ```
 
 Antes do deploy, valide import map e tipos:

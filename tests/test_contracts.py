@@ -155,6 +155,7 @@ class FlashiContractsTest(unittest.TestCase):
             "20261003220443_leaderboard_rpc_and_indexes.sql",
             "20261004023000_ai_ingestion_worker_cron.sql",
             "20261004120000_sdd_activation_expansion.sql",
+            "20261004130000_sdd_mission_hardening.sql",
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
@@ -178,7 +179,20 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment): self.assertIn(fragment, tts)
         crypto = (ROOT / "supabase/functions/_shared/crypto.ts").read_text(encoding="utf-8")
         for fragment in ("signWebhookPayload", "HMAC", "SHA-256", "crypto.subtle.sign"):
-            with self.subTest(fragment=fragment): self.assertIn(fragment, crypto)
+                with self.subTest(fragment=fragment): self.assertIn(fragment, crypto)
+
+    def test_sdd_mission_hardening_contracts(self):
+        migration = (ROOT / "supabase/migrations/20261004130000_sdd_mission_hardening.sql").read_text(encoding="utf-8").lower()
+        for fragment in (
+            "activation_status", "activation_flows", "activation_idempotency",
+            "process_activation", "idempotency_key_reused", "idempotency_in_progress",
+            "user_entitlements", "user_quotas", "consume_user_rate_limit",
+            "enable row level security", "revoke execute",
+        ):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, migration)
+        function = (ROOT / "supabase/functions/activation/index.ts").read_text(encoding="utf-8")
+        for fragment in ("idempotency-key", "sha256Hex", "BOPLA_REJECTED", "process_activation", "requireUserId"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, function)
 
     def test_ai_ingestion_scheduler_is_opt_in_and_uses_vault_secrets(self):
         migration = (ROOT / "0027_ai_ingestion_worker_cron.sql").read_text(encoding="utf-8").lower()

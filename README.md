@@ -909,3 +909,9 @@ python3 -m unittest discover -s tests -p 'test_contracts.py' -v
 ```
 
 Para uma validação de integração completa, configure um projeto Supabase de staging, aplique a sequência implantável em ordem, crie uma conta QA e exercite Auth, RLS, RPCs e Edge Functions com isolamento entre dois usuários. A branch não inclui billing nem gateway de pagamento.
+
+## 16. Hardening SDD implementado nesta rodada
+
+A migration `20261004130000_sdd_mission_hardening.sql` adiciona uma máquina de estados persistida (`PENDING`, `VALIDATING`, `ACTIVE`, `SUSPENDED`, `FAILED`), idempotência transacional por usuário e fingerprint, tabelas de fronteira para entitlements/quotas e um rate limit atômico por usuário e escopo. A Edge Function `activation` valida os campos permitidos, exige `Idempotency-Key`, calcula SHA-256 do payload canônico, propaga `X-Request-Id` e rejeita reutilização de chave com payload diferente.
+
+Como este repositório é Supabase/Edge Functions e não NestJS/Prisma, o equivalente seguro foi implementado no PostgreSQL com RLS, RPCs `SECURITY INVOKER` e validação estrita na Edge Function. Redis/Redlock, `nestjs-cls`, Prisma Extensions e OpenTelemetry não são introduzidos artificialmente nesta stack; ficam como adaptadores de infraestrutura futuros, enquanto a garantia transacional atual permanece no banco.

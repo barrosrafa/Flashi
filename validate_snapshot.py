@@ -24,6 +24,7 @@ EXPECTED = [
     "20261003220443_leaderboard_rpc_and_indexes.sql",
     "20261004023000_ai_ingestion_worker_cron.sql",
     "20261004120000_sdd_activation_expansion.sql",
+    "20261004130000_sdd_mission_hardening.sql",
 ]
 
 

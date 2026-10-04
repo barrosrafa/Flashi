@@ -12,7 +12,7 @@ function getAllowedOrigins(): Set<string> {
   ]);
 }
 
-const ALLOW_HEADERS = "authorization, x-client-info, apikey, content-type";
+const ALLOW_HEADERS = "authorization, x-client-info, apikey, content-type, x-request-id, idempotency-key";
 const ALLOW_METHODS = "POST, OPTIONS";
 
 export function getRequestId(request: Request): string {
@@ -48,6 +48,7 @@ export function jsonResponse(
     headers: {
       ...getCorsHeaders(request),
       "Content-Type": "application/json; charset=utf-8",
+      "X-Request-Id": getRequestId(request),
       ...headers,
     },
   });
