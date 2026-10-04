@@ -818,7 +818,7 @@ O frontend também mantém `localStorage` e cookie como fallback offline. Quando
 
 ## SDD — capacidades liberadas para o usuário final
 
-A implementação atual expõe todas as funcionalidades previstas no SDD: estudo offline-first com outbox e retry, fila priorizada por exames, XP idempotente por sessão, leaderboard materializado, gamificação/badges, configurações completas de SRS/FSRS, CRUD de decks com hierarquia e restauração, importação transacional de CSV/Markdown/Quizlet/RemNote/URL, ingestão por IA com monitor de jobs, mídia/oclusão, busca semântica, Anki e colaboração.
+A implementação atual deste backend cobre os contratos versionados neste repositório: estudo/sync, fila priorizada por exames, XP idempotente por sessão, leaderboard materializado, gamificação/badges, configurações SRS/FSRS, decks, importação, ingestão de IA já implementada, mídia/oclusão, busca semântica, Anki e colaboração. Isso não significa que todas as propostas de produto do SDD estejam implementadas: onboarding, cobrança, limite de créditos e prévia de geração com reserva de créditos não são contratos deste backend nesta versão.
 
 ### Migrations adicionadas
 - `supabase/migrations/20261003220359_sdd_feature_exposure.sql`: habilita o refresh autenticado do leaderboard sem abrir escrita direta na projeção.
@@ -836,3 +836,53 @@ pnpm dev
 ```
 
 As Edge Functions continuam usando autenticação do usuário e RLS; nenhum bucket privado ou tabela de jobs é tornado público pela migration.
+
+
+## SDD de ativação — limite desta entrega e decisões de schema
+
+### O que mudou neste recorte
+
+O onboarding inicial, o resumo da meta no painel e o editor de preferências pertencem ao frontend e usam a API autenticada de Supabase Auth. **Esta branch do backend não adiciona nem altera tabelas, policies RLS, triggers, RPCs, Edge Functions, workers, secrets ou migrations.** Nenhuma migration foi enviada a projeto Supabase nem aplicada remotamente; o contrato implantável da seção 0 permanece inalterado.
+
+O único dado persistido pelo fluxo é um objeto pessoal opcional em `auth.users.user_metadata` via `auth.updateUser()`: objetivo, data-alvo, capacidade semanal, estado/rascunho e data de conclusão. O backend PostgreSQL não lê esses valores para agendar cartões, priorizar exames, liberar conteúdo ou calcular créditos. Usuários que já existiam antes desta versão não recebem flag retroativa nem são redirecionados.
+
+### Confiança e fronteiras de segurança
+
+`user_metadata` é editável pelo próprio titular e não serve como autoridade do servidor. Portanto:
+
+- não derivar papel, ownership, pagamento, entitlement, preço, limite de créditos ou autorização de `user_metadata`;
+- manter acesso real protegido por Auth, RLS e RPCs de domínio como hoje;
+- reservar claims de autorização controlados pelo servidor para `app_metadata` ou uma tabela/serviço de entitlement apropriado;
+- não persistir pergunta livre, conteúdo de estudo, resposta gerada por IA ou dados de cartão de pagamento neste objeto;
+- não emitir eventos analíticos com objetivo/data sem política de consentimento e retenção definida.
+
+Esta implementação não altera regras de `profiles_self`, `study_settings_self`, fila FSRS ou `deck_exams`; suas policies e grants atuais seguem sendo a referência.
+
+### Evolução futura: tabela própria de produto
+
+O SDD recomenda evoluir para tabela dedicada quando houver um alvo de staging explícito, geração canônica de tipos disponível e necessidade de consulta/retention/auditoria independente. Antes de qualquer mudança, criar proposta aditiva com, no mínimo:
+
+1. `user_id uuid primary key references auth.users(id) on delete cascade`;
+2. `goal` em enum/check de valores suportados; `target_date date null`; `weekly_capacity_minutes integer null` com faixa validada;
+3. estado de onboarding (`started_at`, `completed_at` ou equivalente) sem converter preferências em entitlement;
+4. RLS habilitado e policies autenticadas de `SELECT`/`INSERT`/`UPDATE` limitadas a `auth.uid() = user_id`; nada de leitura pública ou grant anônimo;
+5. nenhum campo duplicado de idioma/timezone; sem RPC privilegiada para dados que o titular atualiza;
+6. migration testada em Supabase de staging, teste isolado com dois usuários e usuário anônimo, geração de tipos a partir do schema aplicado e rollout do cliente coordenado;
+7. plano de migração/deleção para as chaves `flashi_product_preferences` e `flashi_onboarding_draft` de `user_metadata`, preservando a possibilidade de limpar ou recusar a preferência.
+
+Não aplicar essa tabela apenas para imitar um esquema futuro: enquanto o perfil é curto, opcional e controlado pelo usuário, a persistência Auth evita uma migração inativa e tipos inconsistentes. Se passar a dirigir contratos do servidor, telemetria, dashboards administrativos ou policy de produto, movê-la para storage relacional antes de depender dela.
+
+### Fora de escopo e critérios de desbloqueio
+
+Não foram implementados billing/preços, integração de PSP, webhooks, reservas/refunds de créditos, preview seguro de IA, quotas por usuário, analytics de ativação, painel administrativo ou alteração do worker `ai-ingest`. Esses itens dependem de decisão comercial/financeira, contrato de provedor, titular do entitlement, política de retenção e parâmetros de segurança. Não registrar tais features como “disponíveis” até serem implementadas e verificadas em staging.
+
+### Validação desta branch
+
+```bash
+python3 validate_sql.py
+python3 validate_snapshot.py
+python3 validate_readme.py
+python3 -m unittest discover -s tests -p 'test_contracts.py' -v
+```
+
+Os validadores de schema são guardrails do backend; os testes funcionais de onboarding ficam no frontend (`tests/onboarding-service.test.ts`). A verificação destas migrations/README não é prova de deploy remoto nem substitui teste Auth/RLS em projeto descartável.
