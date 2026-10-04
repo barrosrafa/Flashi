@@ -124,6 +124,8 @@ class FlashiContractsTest(unittest.TestCase):
         migration = (ROOT / "0026_sdd_ai_worker_gamification_imports.sql").read_text(encoding="utf-8")
         worker = (ROOT / "supabase/functions/ai-ingest-worker/index.ts").read_text(encoding="utf-8")
         importer = (ROOT / "supabase/functions/import-deck/index.ts").read_text(encoding="utf-8")
+        import_content = (ROOT / "supabase/functions/_shared/import-content.ts").read_text(encoding="utf-8")
+        import_url = (ROOT / "supabase/functions/_shared/import-url.ts").read_text(encoding="utf-8")
         for fragment in (
             "claim_ai_ingestion_job", "for update skip locked", "materialize_ai_ingestion_batch",
             "notes_count integer", "cards_count integer", "sync_session_xp", "gamification_xp_sessions",
@@ -134,6 +136,12 @@ class FlashiContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment): self.assertIn(fragment, worker)
         for fragment in ("createSignedUrl", "import-media", "csv", "markdown", "quizlet", "remnote", "materialize_import_batch"):
             with self.subTest(fragment=fragment): self.assertIn(fragment, importer)
+        for fragment in ("downloadImportUrl", "MAX_IMPORT_BYTES", "readBoundedResponse", "storage_path or url"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, importer)
+        for fragment in ("parseDelimited", "unterminated quoted field", "MAX_NOTES"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, import_content)
+        for fragment in ("Deno.resolveDns", "redirect: \"manual\"", "Only the standard HTTPS port"):
+            with self.subTest(fragment=fragment): self.assertIn(fragment, import_url)
 
     def test_v2_snapshot_layout_and_guardrails(self):
         snapshot_dir = ROOT / "supabase/migrations"
@@ -141,7 +149,11 @@ class FlashiContractsTest(unittest.TestCase):
         expected = [
             "00_extensions.sql", "01_types_and_identity.sql", "02_core_schema.sql",
             "03_study_state_and_gamification.sql", "04_functions_triggers_rls.sql",
-            "05_workers_storage_realtime.sql",
+            "05_workers_storage_realtime.sql", "06_harden_public_materializer.sql",
+            "07_import_media_bucket.sql", "08_sync_worker_and_contract_hardening.sql",
+            "20261003220359_sdd_feature_exposure.sql",
+            "20261003220443_leaderboard_rpc_and_indexes.sql",
+            "20261004023000_ai_ingestion_worker_cron.sql",
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
@@ -151,6 +163,18 @@ class FlashiContractsTest(unittest.TestCase):
         combined = "\n".join((snapshot_dir / name).read_text(encoding="utf-8").lower() for name in expected)
         for fragment in ("create table if not exists public.notes", "create table if not exists public.cards", "enable row level security", "search_path"):
             self.assertIn(fragment, combined)
+
+    def test_ai_ingestion_scheduler_is_opt_in_and_uses_vault_secrets(self):
+        migration = (ROOT / "0027_ai_ingestion_worker_cron.sql").read_text(encoding="utf-8").lower()
+        for fragment in (
+            "configure_ai_ingestion_cron", "flashi_service_role_jwt",
+            "flashi_ingestion_worker_secret", "x-worker-secret",
+            "cron.schedule", "cron.unschedule", "from public, anon, authenticated",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, migration)
+        self.assertIn("p_cron text default '*/1 * * * *'", migration)
+        self.assertIn("p_cron not in", migration)
 
     def test_edge_functions_use_user_scoped_and_bounded_contracts(self):
         sync = (ROOT / "supabase/functions/sync/index.ts").read_text(encoding="utf-8")
