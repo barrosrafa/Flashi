@@ -121,3 +121,42 @@ revoke execute on function public.process_activation(text, text, text, text, dat
 grant execute on function public.process_activation(text, text, text, text, date, integer) to authenticated;
 
 commit;
+begin;
+
+create or replace function public.restore_deck(p_deck_id uuid)
+returns jsonb
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  v_deleted_at timestamptz;
+  v_decks integer := 0;
+  v_cards integer := 0;
+begin
+  select deleted_at into v_deleted_at
+    from public.decks
+    where id = p_deck_id and user_id = auth.uid() and deleted_at is not null
+    for update;
+  if v_deleted_at is null then
+    raise exception 'DECK_NOT_FOUND_OR_NOT_DELETED' using errcode = 'P0001';
+  end if;
+  update public.decks
+    set deleted_at = null, is_archived = false, updated_at = now()
+    where id = p_deck_id and user_id = auth.uid() and deleted_at = v_deleted_at;
+  get diagnostics v_decks = row_count;
+  update public.decks
+    set deleted_at = null, is_archived = false, updated_at = now()
+    where parent_deck_id = p_deck_id and user_id = auth.uid() and deleted_at = v_deleted_at;
+  get diagnostics v_decks = v_decks + row_count;
+  update public.cards
+    set deleted_at = null, updated_at = now()
+    where deck_id = p_deck_id and user_id = auth.uid() and deleted_at = v_deleted_at;
+  get diagnostics v_cards = row_count;
+  return jsonb_build_object('deck_count', v_decks, 'card_count', v_cards);
+end;
+$$;
+revoke execute on function public.restore_deck(uuid) from public, anon;
+grant execute on function public.restore_deck(uuid) to authenticated;
+
+commit;
