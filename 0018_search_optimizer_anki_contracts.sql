@@ -251,7 +251,14 @@ begin
   if p_direction not in ('import', 'export') then
     raise exception 'direction must be import or export';
   end if;
-  if p_storage_path is null or p_storage_path !~ ('^' || v_user_id::text || '/(imports|exports)/[^/]+\\.apkg$') then
+  -- Validation without regular expressions (same contract as the v2 migration).
+  if p_storage_path is null
+     or lower(right(p_storage_path, 5)) <> '.apkg'
+     or array_length(string_to_array(p_storage_path, '/'), 1) <> 3
+     or split_part(p_storage_path, '/', 1) <> v_user_id::text
+     or split_part(p_storage_path, '/', 2) not in ('imports', 'exports')
+     or split_part(p_storage_path, '/', 3) = ''
+  then
     raise exception 'storage_path must be user-scoped under imports or exports and end in .apkg';
   end if;
   if p_source_deck_id is not null and not exists (

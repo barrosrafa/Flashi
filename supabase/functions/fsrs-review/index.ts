@@ -162,6 +162,29 @@ Deno.serve(withObservability("fsrs-review", async (request) => {
     const sessionId = asOptionalUuid(body.session_id ?? body.sessionId, "session_id");
     const now = new Date();
 
+    // F02 — idempotent replay. A retry must never return scheduling values that
+    // were recomputed from the already-updated state: the client has to receive
+    // exactly what the database persisted for this client_review_id.
+    const { data: replayedRows, error: replayError } = await client.rpc(
+      "get_review_log_by_client_id",
+      { p_card_id: cardId, p_client_review_id: clientReviewId },
+    );
+    if (replayError) throw new Error(`Idempotency lookup failed: ${replayError.message}`);
+    const replayed = Array.isArray(replayedRows) ? replayedRows[0] : replayedRows;
+    if (replayed) {
+      return jsonResponse(request, {
+        review_id: replayed.review_id,
+        client_review_id: clientReviewId,
+        card_id: cardId,
+        state: replayed.new_state,
+        due_at: replayed.new_due_at,
+        interval_days: replayed.new_interval_days,
+        stability: replayed.new_stability,
+        difficulty: replayed.new_difficulty,
+        idempotent: true,
+      });
+    }
+
     const [{ data: stateRow, error: stateError }, { data: settingsRow, error: settingsError }] =
       await Promise.all([
         client.from("card_learning_state")
