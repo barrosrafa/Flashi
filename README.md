@@ -952,3 +952,107 @@ python3 tests/test_contracts.py
 ```
 
 Depois, em um projeto Supabase de desenvolvimento, aplique as migrações em ordem com `supabase db push` e valide uma conta nova e uma conta legada. O deploy da Edge Function é necessário para testar `POST /functions/v1/activation` em ambiente remoto.
+
+
+## 31. Auditoria operacional, Edge Functions e observabilidade — 06/10/2026
+
+Esta seção registra a validação repetida de 06/10/2026 e complementa a documentação do schema, migrations e workers. O backend permanece a fonte de verdade para RLS, ownership, RPCs, cursor USN, tombstones, idempotência, Storage e processamento assíncrono. O frontend não substitui essas garantias com inserts diretos.
+
+### 31.1 Fronteira entre frontend e backend
+
+`barrosrafa/Flashi` contém PostgreSQL/Supabase, migrations, RLS, RPCs, Storage, Edge Functions e helpers compartilhados. `barrosrafa/app-flashi` contém App Router, serviços, Dexie, outbox, worker local, componentes e telemetria frontend. Uma alteração de contrato deve ser feita em ordem: migration/RPC, publicação da Edge Function, tipos do frontend, serviço de domínio e interface. Liberar o cliente antes do contrato remoto pode produzir falhas de função inexistente ou coluna ausente.
+
+No sync, o cliente envia mutações autenticadas com request ID e idempotência; a função valida origem, JWT, corpo e ownership; as RPCs aplicam a transação; o pull retorna somente entidades visíveis, cursor USN e tombstones; o cliente materializa a partição local. Repetir a mesma mutação não pode criar conteúdo duplicado.
+
+### 31.2 Sequência e rollback
+
+Use somente a sequência implantável da seção 0. `supabase/migrations_archive/` é histórico e não deve ser aplicado automaticamente. Em base existente, compare o histórico remoto, faça backup, aplique uma migration por vez e valide suas RPCs antes de liberar o cliente.
+
+```bash
+python3 validate_sql.py
+python3 -m unittest discover -s tests -v
+git diff --check
+# somente em ambiente autenticado e revisado:
+supabase db push
+```
+
+A restauração transacional foi consolidada em `20261005010000_sdd_user_provisioning.sql` e corrigida para usar `GET DIAGNOSTICS` compatível com PostgreSQL. Ela verifica ownership e limita a restauração de descendentes pelo momento da exclusão; não deve ser substituída por várias atualizações independentes no cliente.
+
+Rollback não significa remover RLS ou apagar migration. Interrompa o rollout do frontend, preserve o estado do banco, desabilite uma flag se houver, examine request IDs e só faça reversão de schema com backup e plano explícito.
+
+### 31.3 Inventário das Edge Functions
+
+| Função | Responsabilidade | Dependências | Sinais observáveis |
+|---|---|---|---|
+| `sync` | Push de mutações e pull incremental | RPC/Data API | request, status, cursor e duração |
+| `fsrs-review` | Revisão FSRS idempotente | PostgreSQL | conflito e estado final |
+| `embeddings` | Vetorização | OpenAI | dependência, rate limit e duração |
+| `semantic-search` | Busca semântica/lexical | embedding/RPC | modo e provider |
+| `fsrs-optimize` | Enfileirar otimização | PostgreSQL | job e status |
+| `fsrs-optimize-worker` | Claim e persistência | WASM/Storage | dependência e exceção |
+| `anki-transfer` | Import/export `.apkg` | Storage/SQLite WASM | job, tamanho e integridade |
+| `ai-ingest` | Validar fonte e criar job | PostgreSQL | request e status |
+| `ai-ingest-worker` | Processar e materializar | LLM/Storage | provider, duração e erro |
+| `import-deck` | Importar formatos aceitos | Storage/materializador | validação e job |
+| `activation` | Provisionamento idempotente | `process_activation` | status e chave idempotente |
+| `tts` | Proxy/cache de voz | ElevenLabs opcional | provider e cache |
+
+As respostas de erro devem seguir `{ error, code, request_id }`. Use `getRequestId`, `getCorsHeaders`, `handleCors`, `jsonResponse` e `handleError`; não devolva stack trace, JWT, conteúdo de nota ou segredo. Ownership deve ser derivado do JWT, nunca de um campo confiado do corpo.
+
+### 31.4 Observabilidade compartilhada
+
+`supabase/functions/_shared/observability.ts` é o wrapper único. `withObservability` preserva/cria request ID, define tags Sentry, mede duração, envia `edge_request_completed` ou `edge_request_failed` e emite log JSON mínimo. `createObservedFetch` acompanha chamadas a OpenAI, ElevenLabs, Storage, WASM e Supabase com host, método, status, resultado e duração.
+
+As variáveis são server-side e nunca devem aparecer em `NEXT_PUBLIC_*`:
+
+```dotenv
+SENTRY_DSN=https://...
+SENTRY_ENVIRONMENT=production
+SENTRY_TRACES_SAMPLE_RATE=0.1
+POSTHOG_PROJECT_TOKEN=phc_...
+POSTHOG_HOST=https://us.i.posthog.com
+POSTHOG_SERVER_ENABLED=1
+```
+
+O sanitizador remove campos relacionados a token, secret, password, authorization, cookie, prompt, response, content, email, goal, target_date, weekly_minutes, idempotency_key e fingerprint. Isso é uma barreira mínima; novos campos devem ser buckets, status, contagens, tamanho ou duração, não conteúdo de usuário.
+
+### 31.5 Sentry validado
+
+A conexão Sentry encontrou a organização `flashi`, região `https://us.sentry.io` e projeto `javascript-nextjs`. Foram consultadas as superfícies de organizações, projetos, errors, logs, traces, replays e metrics. Nas últimas 24 horas, buscas de produção relacionadas a `AUTH_REQUIRED`, `sync`, `dashboard`, `outbox` e PostHog não retornaram erro, log error/warn, trace lento ou replay com erro/rage click. Métricas `error.count` e `http.request.duration` também não retornaram série nos filtros utilizados.
+
+O resultado significa ausência de ocorrência no período consultado, não prova automática de que todos os secrets estejam configurados. Uma função nova deve ser testada em staging ou por chamada autorizada não destrutiva; registre o `X-Request-Id`, procure errors, logs, traces, metrics e replays, e remova dados sensíveis de qualquer comentário operacional.
+
+### 31.6 PostHog validado
+
+A skill do PostHog foi carregada antes das consultas. O schema confirmou `events`, `logs`, `posthog.trace_spans` e `posthog.metrics`. A taxonomia dos últimos 30 dias mostrou `supabase_request_completed`, `page_viewed`, `ui_interaction`, `api_request_started`, `$web_vitals`, `$identify`, `api_request_completed` e `client_error`.
+
+Os eventos server-side `edge_request_completed`, `edge_request_failed`, `edge_request_error`, `dependency_request_completed` e `dependency_request_failed` dependem de token server-side e tráfego real. O cliente também possui `sync_started`, `sync_completed` e `sync_failed`, mas eles não apareceram no snapshot consultado. Portanto, o código está instrumentado, mas não se deve afirmar ingestão sem repetir a pesquisa após uma sessão real.
+
+Consultas devem limitar propriedades a `function_name`, `request_id`, `status`, `outcome`, `duration_ms`, `error_code`, `dependency`, `method`, `category`, `attempt` e buckets. Não envie ou consulte prompt, resposta, conteúdo de note/card, e-mail, cookie, authorization ou chave de idempotência.
+
+### 31.7 CORS, auth e sincronização
+
+`ALLOWED_ORIGINS` e `PREVIEW_ALLOWED_ORIGINS` são allowlists separadas por vírgula. Preflight autorizado responde `204` e só retorna `Access-Control-Allow-Origin` para uma origem conhecida. Em produção, não use `*` em requests com credenciais.
+
+A ausência de sessão no shell do frontend é estado esperado; uma chamada efetiva à Edge Function sem JWT é uma rejeição operacional e deve retornar código consistente. `401` representa autenticação, `403` autorização, `409` conflito/idempotência, `429` limite e `5xx` falha interna/provider. A resposta deve carregar request ID para correlação.
+
+Roteiro de diagnóstico: verificar status e `X-Request-Id`; conferir preflight para `https://app-flashi.vercel.app`; confirmar JWT/usuário; localizar RPC e cursor; verificar `edge_request_completed/error` no PostHog; procurar exception/trace no Sentry; e comparar o código remoto com o commit publicado. Não corrija CORS abrindo todas as origens.
+
+### 31.8 Testes e release
+
+`validate_sql.py` protege sintaxe PostgreSQL. `tests/test_contracts.py` protege o snapshot e a sequência de migrations. `tests/fsrs_smoke.ts` verifica o scheduler FSRS. `tests/anki_roundtrip.ts` valida `.apkg`, tags, mídia e rejeição de zip-slip. Esses testes não comprovam secrets ou RLS remoto; use staging Supabase para isso.
+
+Antes do push, execute:
+
+```bash
+python3 validate_sql.py
+python3 -m unittest discover -s tests -v
+git diff --check
+git status --short --branch
+```
+
+Depois da publicação, confirme a lista de funções, faça uma chamada autenticada não destrutiva, leia logs/status, consulte Sentry por exceções/traces e PostHog após a janela de ingestão. Se não houver tráfego, registre “sem dados no intervalo”; não invente sucesso nem falha.
+
+### 31.9 Resultado desta execução
+
+A suíte Playwright do frontend foi repetida com 52 aprovados, 1 ignorado por ausência de credenciais E2E e 0 falhas. O browser autenticado abriu o dashboard de produção sem a mensagem de erro de carregamento e sem console error. O backend não recebeu nova migration nesta revisão documental; este bloco descreve contratos existentes no checkout e foi criado para reduzir regressões e facilitar manutenção futura.
