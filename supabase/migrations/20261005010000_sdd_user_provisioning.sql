@@ -133,6 +133,7 @@ declare
   v_deleted_at timestamptz;
   v_decks integer := 0;
   v_cards integer := 0;
+  v_count integer := 0;
 begin
   select deleted_at into v_deleted_at
     from public.decks
@@ -148,7 +149,8 @@ begin
   update public.decks
     set deleted_at = null, is_archived = false, updated_at = now()
     where parent_deck_id = p_deck_id and user_id = auth.uid() and deleted_at = v_deleted_at;
-  get diagnostics v_decks = v_decks + row_count;
+  get diagnostics v_count = row_count;
+  v_decks := v_decks + v_count;
   update public.cards
     set deleted_at = null, updated_at = now()
     where deck_id = p_deck_id and user_id = auth.uid() and deleted_at = v_deleted_at;
