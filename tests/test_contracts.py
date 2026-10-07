@@ -168,6 +168,7 @@ class FlashiContractsTest(unittest.TestCase):
             '20261007013000_f39_xp_confirmed_runtime.sql',
             '20261007014000_f38_legacy_unreviewed_states.sql',
             '20261007030000_f20_storage_preflight_limits.sql',
+            '20261007031000_f19_occlusion_rpc_resolution.sql',
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)

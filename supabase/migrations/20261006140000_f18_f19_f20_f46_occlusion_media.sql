@@ -199,6 +199,7 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+#variable_conflict use_column
 declare
   v_user_id uuid := auth.uid();
   v_note public.notes%rowtype;
@@ -239,7 +240,7 @@ begin
     return;
   end if;
 
-  v_ordinal:=coalesce((select max(card_ordinal)+1 from public.cards where note_id=p_note_id and deleted_at is null),0);
+  v_ordinal:=coalesce((select max(existing.card_ordinal)+1 from public.cards existing where existing.note_id=p_note_id and existing.deleted_at is null),0);
   for v_box in select * from jsonb_to_recordset(p_boxes) as b(
     cloze_ordinal integer, label_text text, x_pos double precision, y_pos double precision,
     width_pct double precision, height_pct double precision, metadata jsonb
