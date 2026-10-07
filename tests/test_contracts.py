@@ -167,6 +167,7 @@ class FlashiContractsTest(unittest.TestCase):
             '20261007012000_f15_f16_job_lifecycle.sql',
             '20261007013000_f39_xp_confirmed_runtime.sql',
             '20261007014000_f38_legacy_unreviewed_states.sql',
+            '20261007030000_f20_storage_preflight_limits.sql',
         ]
         self.assertEqual(sorted(path.name for path in snapshot_dir.glob("*.sql")), expected)
         self.assertGreaterEqual(len(list(archive_dir.glob("*.sql"))), 26)
@@ -176,6 +177,17 @@ class FlashiContractsTest(unittest.TestCase):
         combined = "\n".join((snapshot_dir / name).read_text(encoding="utf-8").lower() for name in expected)
         for fragment in ("create table if not exists public.notes", "create table if not exists public.cards", "enable row level security", "search_path"):
             self.assertIn(fragment, combined)
+
+    def test_storage_limits_preserve_owner_isolation(self):
+        sql = (ROOT / 'supabase/migrations/20261007030000_f20_storage_preflight_limits.sql').read_text()
+        self.assertTrue(parse_sql(sql))
+        self.assertIn('public=false', sql)
+        self.assertIn('file_size_limit=26214400', sql)
+        self.assertIn('allowed_mime_types=array[', sql)
+        self.assertIn('for insert to authenticated', sql)
+        self.assertIn('for update to authenticated', sql)
+        self.assertEqual(sql.count('(storage.foldername(name))[1]=(select auth.uid())::text'), 3)
+        self.assertNotIn('with check (true)', sql)
 
     def test_sdd_activation_expansion_contracts(self):
         migration = (ROOT / "supabase/migrations/20261004120000_sdd_activation_expansion.sql").read_text(encoding="utf-8").lower()
