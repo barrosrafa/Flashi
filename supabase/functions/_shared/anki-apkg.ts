@@ -1,4 +1,4 @@
-import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
+import {openAnkiSqlite} from "./anki-sqlite.ts";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 
 const FIELD_SEPARATOR = "\u001f";
@@ -61,7 +61,7 @@ export type ParsedAnkiPackage = {
   files: Record<string, Uint8Array>;
 };
 
-function asString(value: SqlValue | undefined): string {
+function asString(value: unknown): string {
   if (value === null || value === undefined) return "";
   return String(value);
 }
@@ -153,31 +153,6 @@ function parseMediaMap(files: Record<string, Uint8Array>): Record<string, string
   return result;
 }
 
-async function openSqlite(bytes: Uint8Array): Promise<{ sqlite3: any; db: any }> {
-  const sqlite3 = await sqlite3InitModule();
-  const db = new sqlite3.oo1.DB(":memory:", "c");
-  const pointer = sqlite3.wasm.allocFromTypedArray(bytes);
-  const flags = sqlite3.capi.SQLITE_DESERIALIZE_FREEONCLOSE |
-    sqlite3.capi.SQLITE_DESERIALIZE_RESIZEABLE;
-  const dbPointer = db.pointer as number | undefined;
-  if (dbPointer === undefined) {
-    db.close();
-    throw new Error("Unable to obtain SQLite database pointer");
-  }
-  const result = sqlite3.capi.sqlite3_deserialize(
-    dbPointer,
-    "main",
-    pointer,
-    bytes.byteLength,
-    bytes.byteLength,
-    flags,
-  );
-  if (result !== 0) {
-    db.close();
-    throw new Error(`Unable to open Anki SQLite database (code ${result})`);
-  }
-  return { sqlite3, db };
-}
 
 function findCollection(files: Record<string, Uint8Array>): Uint8Array {
   if (files["collection.anki21b"]) {
@@ -223,14 +198,14 @@ export async function parseAnkiPackage(bytes: Uint8Array): Promise<ParsedAnkiPac
   }
   if (Object.keys(safeFiles).length > MAX_ARCHIVE_ENTRIES) throw new Error("Anki package has too many entries");
 
-  const { db } = await openSqlite(findCollection(safeFiles));
+  const db=await openAnkiSqlite(findCollection(safeFiles));
   try {
     const modelsRaw = asString(db.selectValue("select models from col limit 1"));
     const models = jsonObject(modelsRaw, "models");
     // The cards join is intentional: templates describe possible cards, while
     // cards.ord is the source of truth for cards actually present in APKG.
     const rows = db.exec({
-      sql: "select n.id as nid, n.mid, n.flds, n.tags, n.mod, c.id as cid, c.ord as card_ord from notes n left join cards c on c.nid = n.id order by n.id, c.ord, c.id",
+      sql: "select cast(n.id as text) as nid, cast(n.mid as text) as mid, n.flds, n.tags, n.mod, cast(c.id as text) as cid, c.ord as card_ord from notes n left join cards c on c.nid = n.id order by n.id, c.ord, c.id",
       rowMode: "object",
       returnValue: "resultRows",
     }) as SqlRow[];
@@ -424,8 +399,7 @@ function templatesForGroup(group: ExportGroup): AnkiTemplate[] {
 
 export async function buildAnkiPackage(cards: ExportCard[]): Promise<Uint8Array> {
   if (cards.length === 0) throw new Error("At least one card is required for Anki export");
-  const sqlite3 = await sqlite3InitModule();
-  const db = new sqlite3.oo1.DB(":memory:", "c");
+  const db=await openAnkiSqlite();
   const now = Math.floor(Date.now() / 1000);
   const groups = new Map<string, ExportGroup>();
   for (const card of cards) {
@@ -577,12 +551,7 @@ export async function buildAnkiPackage(cards: ExportCard[]): Promise<Uint8Array>
     });
   }
   archive["media"] = strToU8(JSON.stringify(media));
-  const dbPointer = db.pointer as number | undefined;
-  if (dbPointer === undefined) {
-    db.close();
-    throw new Error("Unable to obtain SQLite database pointer for export");
-  }
-  archive["collection.anki2"] = sqlite3.capi.sqlite3_js_db_export(dbPointer);
+  archive["collection.anki2"]=db.export();
   db.close();
   return zipSync(archive, { level: 6 });
 }

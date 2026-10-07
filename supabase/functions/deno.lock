@@ -10,6 +10,7 @@
     "npm:fsrs-browser@6.6.0": "6.6.0",
     "npm:openai@^4.52.5": "4.104.0",
     "npm:pdf-parse@1.1.1": "1.1.1",
+    "npm:sql.js@1.13.0": "1.13.0",
     "npm:ts-fsrs@5.4.1": "5.4.1",
     "npm:youtube-transcript@1.2.1": "1.2.1"
   },
@@ -414,6 +415,9 @@
     },
     "safer-buffer@2.1.2": {
       "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="
+    },
+    "sql.js@1.13.0": {
+      "integrity": "sha512-RJbVP1HRDlUUXahJ7VMTcu9Rm1Nzw+EBpoPr94vnbD4LwR715F3CcxE2G2k45PewcaZ57pjetYa+LoSJLAASgA=="
     },
     "tr46@0.0.3": {
       "integrity": "sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw=="
