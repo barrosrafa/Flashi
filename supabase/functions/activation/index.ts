@@ -6,11 +6,11 @@ import {
   jsonResponse,
   readJson,
   requireRecord,
-  requireString,
   RequestError,
   sha256Hex,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
+import { enforceUserRateLimit } from "../_shared/rate-limit.ts";
 import { captureException, capturePostHogEvent, setRequestContext } from "../_shared/observability.ts";
 
 const ALLOWED_FIELDS = new Set(["goal", "target_date", "weekly_minutes"]);
@@ -33,12 +33,10 @@ Deno.serve(withObservability("activation", async (request) => {
     const client = createUserClient(request);
     userId = await requireUserId(client);
     setRequestContext({ functionName: "activation", requestId, userId });
-    const [{ data: shortAllowed, error: shortError }, { data: sustainedAllowed, error: sustainedError }] = await Promise.all([
-      client.rpc("consume_user_rate_limit", { p_scope: "activation:short", p_limit: 10, p_window_seconds: 10 }),
-      client.rpc("consume_user_rate_limit", { p_scope: "activation:sustained", p_limit: 60, p_window_seconds: 60 }),
+    await Promise.all([
+      enforceUserRateLimit(client, "activation-short", 10, 10),
+      enforceUserRateLimit(client, "activation-sustained", 60, 60),
     ]);
-    if (shortError || sustainedError) throw new Error("Rate limit check failed");
-    if (shortAllowed === false || sustainedAllowed === false) throw new RequestError("Too many activation attempts", 429, "RATE_LIMITED");
     const body = requireRecord(await readJson(request), "Activation payload must be an object");
     const unknown = Object.keys(body).filter((key) => !ALLOWED_FIELDS.has(key));
     if (unknown.length) throw new RequestError(`Unknown activation fields: ${unknown.join(", ")}`, 422, "BOPLA_REJECTED");
