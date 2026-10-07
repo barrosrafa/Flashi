@@ -170,6 +170,7 @@ async function importPackage(
   if (parsed.notes.some((note) => note.cards.length === 0)) {
     throw new RequestError("Anki package contains a note without a real cards row; no synthetic Basic card was created. Re-export the note from Anki with its cards intact.", 422);
   }
+
   const referencedMedia = new Set<string>();
   for (const note of parsed.notes) {
     for (const [archiveKey, filename] of Object.entries(parsed.media)) {
@@ -180,28 +181,50 @@ async function importPackage(
   if (unreferencedMedia.length > 0) {
     throw new RequestError(`Anki package contains ${unreferencedMedia.length} media file(s) not referenced by any note field; import aborted instead of silently dropping bytes. Attach them to a field in Anki and re-export.`, 422);
   }
+  if (referencedMedia.size > MAX_MEDIA_PER_JOB) {
+    throw new RequestError(`Anki package exceeds ${MAX_MEDIA_PER_JOB} linked media files`, 413);
+  }
+
   const deck = await ensureTargetDeck(client, userId, targetDeckName);
+  const externalIds = parsed.notes.map((note) => note.externalId);
+  const { data: existingRows, error: existingRowsError } = await client
+    .from("notes")
+    .select("external_id")
+    .eq("user_id", userId)
+    .eq("source_format", "anki_apkg")
+    .in("external_id", externalIds)
+    .is("deleted_at", null)
+    .limit(MAX_NOTES);
+  if (existingRowsError) throw new Error(`existing note query failed: ${existingRowsError.message}`);
+  const existingIds = new Set((existingRows ?? []).map((row) => String(row.external_id)));
+
+  // A package can contain hundreds of notes. Reusing templates and limiting
+  // concurrency avoids thousands of serial round trips while preserving the
+  // per-note RPC as the atomic unit of creation.
+  const templateCache = new Map<string, Promise<string>>();
+  const templateFor = (note: ParsedAnkiNote): Promise<string> => {
+    const key = `${note.modelId}:${note.modelName}`;
+    let cached = templateCache.get(key);
+    if (!cached) {
+      cached = ensureTemplate(client, userId, note);
+      templateCache.set(key, cached);
+    }
+    return cached;
+  };
+
   let importedNotes = 0;
   let importedCards = 0;
   let skippedNotes = 0;
   let uploadedMedia = 0;
+  let nextIndex = 0;
+  const workerCount = Math.min(6, parsed.notes.length);
 
-  for (const note of parsed.notes) {
-    const { data: existing, error: existingError } = await client
-      .from("notes")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("source_format", "anki_apkg")
-      .eq("external_id", note.externalId)
-      .is("deleted_at", null)
-      .maybeSingle();
-    if (existingError) throw new Error(`existing note query failed: ${existingError.message}`);
-    if (existing) {
+  const importOne = async (note: ParsedAnkiNote): Promise<void> => {
+    if (existingIds.has(note.externalId)) {
       skippedNotes += 1;
-      continue;
+      return;
     }
-
-    const templateId = await ensureTemplate(client, userId, note);
+    const templateId = await templateFor(note);
     const contentHash = await sha256Hex(JSON.stringify(note.fields));
     const cardDefinitions = note.cards.map((card) => ({
       card_ordinal: card.ordinal,
@@ -246,9 +269,6 @@ async function importPackage(
     const matchingMedia = Object.entries(parsed.media).filter(([, filename]) =>
       Object.values(note.fields).some((field) => field.includes(filename))
     );
-    if (uploadedMedia + matchingMedia.length > MAX_MEDIA_PER_JOB) {
-      throw new RequestError(`Anki package exceeds ${MAX_MEDIA_PER_JOB} linked media files`, 413);
-    }
     for (const [archiveKey, filename] of matchingMedia) {
       const mediaBytes = parsed.files[archiveKey];
       if (!mediaBytes) continue;
@@ -279,7 +299,16 @@ async function importPackage(
     }
     importedNotes += 1;
     importedCards += cardIds.length;
-  }
+  };
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= parsed.notes.length) return;
+      await importOne(parsed.notes[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   return {
     status: "completed",
@@ -292,7 +321,6 @@ async function importPackage(
     uploaded_media: uploadedMedia,
   };
 }
-
 function objectValue(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
