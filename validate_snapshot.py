@@ -27,6 +27,16 @@ EXPECTED = [
     "20261004130000_sdd_mission_hardening.sql",
     "20261005000000_sdd_core_hardening.sql",
     "20261005010000_sdd_user_provisioning.sql",
+    "20261006140000_f18_f19_f20_f46_occlusion_media.sql",
+            '20261006221500_fix_anki_path_regex_and_review_replay.sql',
+            '20261006230000_anki_f14_card_ordinals.sql',
+            '20261007000000_f27_f42_learning_goals.sql',
+            '20261007002000_f25_collaboration_invites.sql',
+            '20261007010000_f48_core_confirmation.sql',
+            '20261007011000_f15_job_states.sql',
+            '20261007012000_f15_f16_job_lifecycle.sql',
+            '20261007013000_f39_xp_confirmed_runtime.sql',
+            '20261007014000_f38_legacy_unreviewed_states.sql',
 ]
 
 

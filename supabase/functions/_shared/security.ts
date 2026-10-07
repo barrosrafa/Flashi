@@ -13,7 +13,7 @@ export function handleCorsPreflight(request: Request): Response | null {
 function blockedIpv4(value: string): boolean {
   const p = value.split(".").map(Number);
   if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b, c] = p;
+  const [a = 0, b = 0, c = 0] = p;
   return a === 0 || a === 10 || a === 127 || a >= 224 ||
     (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168)) ||

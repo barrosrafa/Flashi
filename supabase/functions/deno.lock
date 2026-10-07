@@ -2,6 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@supabase/functions-js@*": "2.117.2",
+    "npm:@sentry/deno@10.26.0": "10.26.0",
     "npm:@sqlite.org/sqlite-wasm@3.53.0-build1": "3.53.0-build1",
     "npm:@supabase/supabase-js@2.112.4": "2.112.4",
     "npm:cheerio@1.0.0": "1.0.0",
@@ -21,6 +22,19 @@
     }
   },
   "npm": {
+    "@opentelemetry/api@1.9.1": {
+      "integrity": "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="
+    },
+    "@sentry/core@10.26.0": {
+      "integrity": "sha512-TjDe5QI37SLuV0q3nMOH8JcPZhv2e85FALaQMIhRILH9Ce6G7xW5GSjmH91NUVq8yc3XtiqYlz/EenEZActc4Q=="
+    },
+    "@sentry/deno@10.26.0": {
+      "integrity": "sha512-3dMPXzk3GNX/LGl1WJx0BOVAFi4PA3aWvl1xX4JmTrOyvrHYAR/6/1YQZwFSq61S+6lxqP/X/DPrygKQF7BfnA==",
+      "dependencies": [
+        "@opentelemetry/api",
+        "@sentry/core"
+      ]
+    },
     "@sqlite.org/sqlite-wasm@3.53.0-build1": {
       "integrity": "sha512-PfWPWN2n+/37doa8oh2/oUXk4OOsRYZsxc1W1sDXIGb/Pu5Yrb+f2eyYpgQMGITVX7HVgxhs9P18Rc6I97ym/g=="
     },
@@ -445,6 +459,7 @@
   },
   "workspace": {
     "dependencies": [
+      "npm:@sentry/deno@10.26.0",
       "npm:@sqlite.org/sqlite-wasm@3.53.0-build1",
       "npm:@supabase/supabase-js@2.112.4",
       "npm:cheerio@1.0.0",

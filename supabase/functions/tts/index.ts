@@ -1,4 +1,4 @@
-import { fetchWithObservability, withObservability } from "../_shared/observability.ts";
+import { fetchWithObservability, withObservability, createObservedFetch } from "../_shared/observability.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {

@@ -1,3 +1,5 @@
+import { dispatchEdge } from '../_shared/dispatch.ts';
+import { getRequestId } from '../_shared/http.ts';
 import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
@@ -17,17 +19,23 @@ const MAX_REFERENCE_LENGTH = 2_000;
 const ALLOWED_SOURCE_TYPES = new Set(["pdf_document", "youtube_url", "raw_text_block", "web_page"]);
 
 Deno.serve(withObservability("ai-ingest", async (request) => {
-  if (request.method === "OPTIONS") return new Response("ok", { headers: {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-  }});
+  const corsResponse = handleCors(request);
+  if (corsResponse) return corsResponse;
   if (request.method !== "POST") return errorResponse(request, "Method not allowed", 405, "METHOD_NOT_ALLOWED");
 
   try {
     const client = createUserClient(request);
     const userId = await requireUserId(client);
     const body = requireRecord(await readJson(request, MAX_PDF_BYTES + 1_000_000));
+    if (body.action === 'capabilities') return jsonResponse(request,{provider_configured:Boolean(Deno.env.get('OPENAI_API_KEY')),publication_requires_selection:true});
+    if (!Deno.env.get('OPENAI_API_KEY')) throw new RequestError('O provedor de geração ainda não está configurado. Use importação de arquivo ou solicite a configuração à equipe responsável.',503,'AI_PROVIDER_NOT_CONFIGURED');
+    const launch=(jobId:string)=>dispatchEdge('ai-ingest-worker',{job_id:jobId},`Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,getRequestId(request),Deno.env.get('INGESTION_WORKER_SECRET'));
+    if(body.action === 'dispatch') {
+      const jobId=requireUuid(body.job_id,'job_id');
+      const {data:owned,error:ownedError}=await client.from('ai_ingestion_jobs').select('id').eq('id',jobId).eq('user_id',userId).eq('status','queued').maybeSingle();
+      if(ownedError||!owned)throw new RequestError('Job não disponível para esta conta.',404,'JOB_NOT_FOUND');
+      void launch(jobId); return jsonResponse(request,{job_id:jobId,status:'queued'},202);
+    }
     const deckId = requireUuid(body.deck_id ?? body.deckId, "deck_id");
     const sourceType = requireString(body.source_type ?? body.sourceType, "source_type", { maxLength: 32 });
     if (!ALLOWED_SOURCE_TYPES.has(sourceType)) throw new RequestError("Unsupported source_type", 400);
@@ -66,6 +74,7 @@ Deno.serve(withObservability("ai-ingest", async (request) => {
       status: "queued",
     }).select("id, status, created_at").single();
     if (error) throw new Error(`job creation failed: ${error.message}`);
+    void launch(job.id);
     return jsonResponse(request, { job_id: job.id, status: job.status, created_at: job.created_at });
   } catch (error) {
     return handleError(error, request, "ai-ingest");

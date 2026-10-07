@@ -12,7 +12,7 @@ import {
   sha256Hex,
 } from "../_shared/http.ts";
 import { createUserClient, requireUserId } from "../_shared/supabase.ts";
-import { enforceUserRateLimit } from "../_shared/rate-limit.ts";
+import { enforceUserRateLimit, UserRateLimitError } from "../_shared/rate-limit.ts";
 
 const MAX_QUERY_CHARS = 8_000;
 
@@ -70,6 +70,14 @@ Deno.serve(withObservability("semantic-search", async (request) => {
       results: data ?? [],
     });
   } catch (error) {
+    if (error instanceof UserRateLimitError) {
+      return jsonResponse(request, {
+        error: error.message,
+        code: error.code,
+        retry_after_seconds: error.retryAfterSec,
+        request_id: request.headers.get("x-request-id"),
+      }, 429, { "Retry-After": String(error.retryAfterSec) });
+    }
     return handleError(error, request, "semantic-search");
   }
 }));

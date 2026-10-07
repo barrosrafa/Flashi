@@ -3,43 +3,60 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 
 const FIELD_SEPARATOR = "\u001f";
 const MAX_ARCHIVE_ENTRIES = 20_000;
-const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const MAX_PACKAGE_BYTES = 50 * 1024 * 1024;
 
+// SQLite values returned by sqlite-wasm's object row mode.
 type SqlValue = string | number | bigint | Uint8Array | null;
 type SqlRow = Record<string, SqlValue>;
 
-type AnkiTemplate = {
-  name?: string;
-  ord?: number;
-  qfmt?: string;
-  afmt?: string;
+export type AnkiTemplate = {
+  name: string;
+  ord: number;
+  qfmt: string;
+  afmt: string;
+  cardKind: "basic" | "reverse" | "cloze";
+  clozeOrdinal: number | null;
 };
 
 type AnkiModel = {
+  id?: number;
   name?: string;
+  type?: number;
   flds?: Array<{ name?: string; ord?: number }>;
-  tmpls?: AnkiTemplate[];
+  tmpls?: Array<{ name?: string; ord?: number; qfmt?: string; afmt?: string }>;
   css?: string;
 };
 
 export type ParsedAnkiCard = {
+  /** The actual SQLite cards.id, not a template-generated synthetic id. */
+  externalId: string;
+  ordinal: number;
   front: string;
   back: string;
-  cardKind: "basic" | "cloze";
+  cardKind: "basic" | "reverse" | "cloze";
   clozeOrdinal: number | null;
+  template: AnkiTemplate;
 };
 
 export type ParsedAnkiNote = {
+  /** The actual SQLite notes.id. */
   externalId: string;
   modelId: string;
+  modelName: string;
+  modelType: number;
+  css: string;
+  fieldOrder: string[];
   modifiedAt: number;
   fields: Record<string, string>;
   tags: string[];
+  /** Only cards present in SQLite cards are returned; no template inference. */
   cards: ParsedAnkiCard[];
+  templates: AnkiTemplate[];
 };
 
 export type ParsedAnkiPackage = {
   notes: ParsedAnkiNote[];
+  /** Anki's media manifest: numeric archive key -> original filename. */
   media: Record<string, string>;
   files: Record<string, Uint8Array>;
 };
@@ -66,26 +83,49 @@ function jsonObject(value: string, label: string): Record<string, unknown> {
   }
 }
 
+/** Reject absolute paths and every dot/dot-dot path segment (ZIP slip). */
 function safeArchiveName(name: string): string {
   const normalized = name.replaceAll("\\", "/");
-  if (!normalized || normalized.startsWith("/") || normalized.includes("../") || normalized.includes("..\\")) {
-    throw new Error("Unsafe path in Anki ZIP archive");
+  if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) || normalized.includes("\u0000")) {
+    throw new Error(`Unsafe path in Anki ZIP archive: ${name}`);
+  }
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === ".." || segment === "." || /[\u0000-\u001f]/.test(segment))) {
+    throw new Error(`Unsafe path in Anki ZIP archive: ${name}`);
   }
   return normalized;
 }
 
-function renderAnki(template: string, fields: Record<string, string>, frontSide = ""): string {
+function clozeText(value: string, ordinal: number | null, reveal: boolean): string {
+  if (ordinal === null) return value;
+  return value.replace(/\{\{c(\d+)::([\s\S]*?)(?:::(.*?))?\}\}/gi, (_match, rawOrdinal, body, hint) => {
+    const current = Number(rawOrdinal);
+    if (reveal || current !== ordinal) return String(body);
+    const cleanHint = typeof hint === "string" && hint.length > 0 ? `...${hint}` : "[...]";
+    return cleanHint;
+  });
+}
+
+/** Render the Anki subset represented by the stored model metadata. */
+function renderAnki(
+  template: string,
+  fields: Record<string, string>,
+  frontSide = "",
+  clozeOrdinal: number | null = null,
+  revealCloze = false,
+): string {
   let rendered = template;
   rendered = rendered.replace(/\{\{#([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_match, field, body) =>
     fields[String(field).trim()] ? body : "");
   rendered = rendered.replace(/\{\{\^([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_match, field, body) =>
     fields[String(field).trim()] ? "" : body);
   rendered = rendered.replace(/\{\{FrontSide\}\}/g, frontSide);
-  rendered = rendered.replace(/\{\{(?:cloze|type|text):([^}]+)\}\}/g, (_match, field) => {
-    const value = fields[String(field).trim()] ?? "";
-    return String(value);
-  });
-  rendered = rendered.replace(/\{\{c(\d+)::([^}:]+)(?:::[^}]+)?\}\}/gi, "$2");
+  rendered = rendered.replace(/\{\{cloze:([^}]+)\}\}/gi, (_match, field) =>
+    clozeText(fields[String(field).trim()] ?? "", clozeOrdinal, revealCloze));
+  rendered = rendered.replace(/\{\{(?:type|text):([^}]+)\}\}/gi, (_match, field) =>
+    fields[String(field).trim()] ?? "");
+  // Some exported/custom models put a literal cloze marker in a template.
+  rendered = clozeText(rendered, clozeOrdinal, revealCloze);
   rendered = rendered.replace(/\{\{([^}]+)\}\}/g, (_match, field) => fields[String(field).trim()] ?? "");
   return rendered;
 }
@@ -96,8 +136,19 @@ function parseMediaMap(files: Record<string, Uint8Array>): Record<string, string
   const raw = strFromU8(mediaBytes);
   const parsed = jsonObject(raw, "media");
   const result: Record<string, string> = {};
+  const filenameToArchive = new Map<string, string>();
   for (const [key, value] of Object.entries(parsed)) {
-    if (typeof value === "string") result[key] = safeArchiveName(value);
+    if (!/^\d+$/.test(key)) throw new Error(`Invalid Anki media archive key: ${key}`);
+    if (typeof value !== "string" || !value) throw new Error(`Invalid Anki media filename for archive key ${key}`);
+    const filename = safeArchiveName(value);
+    const mediaFile = files[key];
+    if (!mediaFile) throw new Error(`Anki media manifest references missing archive entry ${key}`);
+    const previousKey = filenameToArchive.get(filename);
+    if (previousKey && previousKey !== key) {
+      throw new Error(`Anki media manifest maps ${filename} more than once; cannot preserve bytes unambiguously`);
+    }
+    filenameToArchive.set(filename, key);
+    result[key] = filename;
   }
   return result;
 }
@@ -129,80 +180,122 @@ async function openSqlite(bytes: Uint8Array): Promise<{ sqlite3: any; db: any }>
 }
 
 function findCollection(files: Record<string, Uint8Array>): Uint8Array {
-  const supported = ["collection.anki2", "collection.anki21"];
-  for (const filename of supported) {
-    if (files[filename]) return files[filename];
-  }
   if (files["collection.anki21b"]) {
-    throw new Error("collection.anki21b is not supported yet; export a legacy .apkg from Anki");
+    throw new Error("collection.anki21b is not supported yet; export a legacy .apkg with collection.anki2 or collection.anki21 from Anki");
+  }
+  for (const filename of ["collection.anki2", "collection.anki21"]) {
+    if (files[filename]) return files[filename];
   }
   throw new Error("Anki package does not contain collection.anki2 or collection.anki21");
 }
 
+function modelTemplates(model: AnkiModel): AnkiTemplate[] {
+  const templates = Array.isArray(model.tmpls) ? model.tmpls : [];
+  return templates
+    .map((template, index) => {
+      const ord = Number.isInteger(template.ord) ? Number(template.ord) : index;
+      const qfmt = String(template.qfmt ?? "");
+      const afmt = String(template.afmt ?? "");
+      const cloze = model.type === 1 || /\{\{cloze:/i.test(`${qfmt}${afmt}`);
+      return {
+        name: String(template.name ?? `Card ${ord + 1}`),
+        ord,
+        qfmt,
+        afmt,
+        cardKind: cloze ? "cloze" : "basic",
+        clozeOrdinal: null,
+      } satisfies AnkiTemplate;
+    })
+    .sort((left, right) => left.ord - right.ord);
+}
+
 export async function parseAnkiPackage(bytes: Uint8Array): Promise<ParsedAnkiPackage> {
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_MEDIA_BYTES) {
-    throw new Error(`Anki package must be between 1 byte and ${MAX_MEDIA_BYTES} bytes`);
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_PACKAGE_BYTES) {
+    throw new Error(`Anki package must be between 1 byte and ${MAX_PACKAGE_BYTES} bytes`);
   }
   const files = unzipSync(bytes);
-  const fileNames = Object.keys(files).map(safeArchiveName);
-  if (fileNames.length > MAX_ARCHIVE_ENTRIES) throw new Error("Anki package has too many entries");
   const safeFiles: Record<string, Uint8Array> = {};
-  for (const filename of fileNames) {
-    const file = files[filename];
+  for (const rawName of Object.keys(files)) {
+    const filename = safeArchiveName(rawName);
+    if (safeFiles[filename]) throw new Error(`Duplicate path in Anki ZIP archive: ${filename}`);
+    const file = files[rawName];
     if (file) safeFiles[filename] = file;
   }
+  if (Object.keys(safeFiles).length > MAX_ARCHIVE_ENTRIES) throw new Error("Anki package has too many entries");
 
   const { db } = await openSqlite(findCollection(safeFiles));
   try {
     const modelsRaw = asString(db.selectValue("select models from col limit 1"));
     const models = jsonObject(modelsRaw, "models");
+    // The cards join is intentional: templates describe possible cards, while
+    // cards.ord is the source of truth for cards actually present in APKG.
     const rows = db.exec({
-      sql: "select id as nid, mid, flds, tags, mod from notes order by id limit 10000",
+      sql: "select n.id as nid, n.mid, n.flds, n.tags, n.mod, c.id as cid, c.ord as card_ord from notes n left join cards c on c.nid = n.id order by n.id, c.ord, c.id",
       rowMode: "object",
       returnValue: "resultRows",
     }) as SqlRow[];
     const notes: ParsedAnkiNote[] = [];
+    let current: ParsedAnkiNote | null = null;
 
     for (const row of rows) {
-      const modelId = asString(row.mid);
-      const model = (models[modelId] ?? {}) as AnkiModel;
-      const modelFields = Array.isArray(model.flds) ? model.flds : [];
-      const rawFields = asString(row.flds).split(FIELD_SEPARATOR);
-      const fields: Record<string, string> = {};
-      for (let index = 0; index < Math.max(modelFields.length, rawFields.length); index += 1) {
-        const fieldName = modelFields[index]?.name?.trim() || `Field${index + 1}`;
-        fields[fieldName] = rawFields[index] ?? "";
+      const nid = asString(row.nid);
+      if (!nid) continue;
+      if (!current || current.externalId !== `anki:${nid}`) {
+        const modelId = asString(row.mid);
+        const model = (models[modelId] ?? {}) as AnkiModel;
+        const modelFields = Array.isArray(model.flds) ? model.flds.slice().sort((a, b) => Number(a.ord ?? 0) - Number(b.ord ?? 0)) : [];
+        const fieldOrder: string[] = [];
+        const fields: Record<string, string> = {};
+        const rawFields = asString(row.flds).split(FIELD_SEPARATOR);
+        for (let index = 0; index < Math.max(modelFields.length, rawFields.length); index += 1) {
+          const fieldName = modelFields[index]?.name?.trim() || `Field${index + 1}`;
+          if (fieldOrder.includes(fieldName)) throw new Error(`Anki note ${nid} has duplicate model field ${fieldName}; cannot preserve fields by name`);
+          fieldOrder.push(fieldName);
+          fields[fieldName] = rawFields[index] ?? "";
+        }
+        current = {
+          externalId: `anki:${nid}`,
+          modelId,
+          modelName: String(model.name ?? `Anki model ${modelId}`),
+          modelType: Number(model.type ?? 0),
+          css: String(model.css ?? ""),
+          fieldOrder,
+          modifiedAt: asNumber(row.mod),
+          fields,
+          tags: asString(row.tags).trim().split(/\s+/).filter(Boolean),
+          cards: [],
+          templates: modelTemplates(model),
+        };
+        notes.push(current);
       }
 
-      const cards: ParsedAnkiCard[] = [];
-      const templates = Array.isArray(model.tmpls) ? model.tmpls : [];
-      for (const template of templates) {
-        const question = String(template.qfmt ?? "");
-        const answer = String(template.afmt ?? "");
-        if (!question && !answer) continue;
-        const front = renderAnki(question, fields);
-        const back = renderAnki(answer, fields, front);
-        const cloze = question.match(/\{\{c(\d+)::/i);
-        cards.push({
+      // A note with no cards is retained for diagnostics, but import refuses it
+      // rather than silently creating a synthetic Basic card.
+      if (row.cid !== null && row.cid !== undefined) {
+        const ordinal = asNumber(row.card_ord);
+        if (!Number.isInteger(ordinal) || ordinal < 0) throw new Error(`Anki card ${asString(row.cid)} has invalid ordinal`);
+        const template = current.templates.find((candidate) => candidate.ord === ordinal);
+        if (!template) {
+          throw new Error(`Anki note ${current.externalId} card ordinal ${ordinal} has no matching model template; export the note with its model metadata intact`);
+        }
+        const isCloze = current.modelType === 1 || template.cardKind === "cloze";
+        const actualTemplate: AnkiTemplate = {
+          ...template,
+          cardKind: isCloze ? "cloze" : template.cardKind,
+          clozeOrdinal: isCloze ? ordinal + 1 : null,
+        };
+        const front = renderAnki(actualTemplate.qfmt, current.fields, "", actualTemplate.clozeOrdinal, false);
+        const back = renderAnki(actualTemplate.afmt, current.fields, front, actualTemplate.clozeOrdinal, true);
+        current.cards.push({
+          externalId: `anki:${asString(row.cid)}`,
+          ordinal,
           front,
           back,
-          cardKind: cloze ? "cloze" : "basic",
-          clozeOrdinal: cloze ? Number(cloze[1]) : null,
+          cardKind: actualTemplate.cardKind,
+          clozeOrdinal: actualTemplate.clozeOrdinal,
+          template: actualTemplate,
         });
       }
-      if (cards.length === 0) {
-        const values = Object.values(fields);
-        cards.push({ front: values[0] ?? "", back: values.slice(1).join("\n\n"), cardKind: "basic", clozeOrdinal: null });
-      }
-
-      notes.push({
-        externalId: `anki:${asString(row.nid)}`,
-        modelId,
-        modifiedAt: asNumber(row.mod),
-        fields,
-        tags: asString(row.tags).trim().split(/\s+/).filter(Boolean).slice(0, 100),
-        cards,
-      });
     }
     return { notes, media: parseMediaMap(safeFiles), files: safeFiles };
   } finally {
@@ -221,31 +314,159 @@ function numericId(value: string, fallback: number): number {
   return normalized > 0 ? normalized : fallback;
 }
 
+function uniqueNumericId(value: string, fallback: number, used: Set<number>): number {
+  let candidate = numericId(value, fallback);
+  while (used.has(candidate)) candidate = candidate >= 2_000_000_000 ? fallback + used.size + 1 : candidate + 1;
+  used.add(candidate);
+  return candidate;
+}
+
+function exportFilename(name: string): string {
+  const normalized = name.replaceAll("\\", "/");
+  if (!normalized || normalized.startsWith("/") || normalized.split("/").some((segment) => segment === ".." || segment === "." || segment === "")) {
+    throw new Error(`Invalid Anki media filename ${name}; cannot preserve media safely`);
+  }
+  return normalized;
+}
+
+export type AnkiExportModel = {
+  id?: string;
+  name?: string;
+  type?: number;
+  css?: string;
+  fields?: Array<{ name: string; ord?: number }>;
+  templates?: AnkiTemplate[];
+};
+
 export type ExportCard = {
   id: string;
+  /** Cards with the same noteId are emitted as cards of one Anki note. */
+  noteId?: string;
+  deckId: string;
+  deckName: string;
+  fields: Record<string, unknown>;
+  /** Optional model/note fields; fields remains the backwards-compatible fallback. */
+  noteFields?: Record<string, unknown>;
+  tags: string[];
+  cardOrdinal?: number;
+  cardKind?: "basic" | "reverse" | "cloze";
+  clozeOrdinal?: number | null;
+  template?: AnkiTemplate;
+  model?: AnkiExportModel;
+  media: Array<{ fieldName: string | null; filename: string; bytes: Uint8Array; sha256?: string }>;
+};
+
+type ExportGroup = {
+  noteId: string;
   deckId: string;
   deckName: string;
   fields: Record<string, unknown>;
   tags: string[];
-  media: Array<{ fieldName: string | null; filename: string; bytes: Uint8Array }>;
+  model: AnkiExportModel;
+  cards: ExportCard[];
 };
+
+function mergeTags(cards: ExportCard[]): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const card of cards) {
+    for (const tag of card.tags) {
+      if (!seen.has(tag)) {
+        seen.add(tag);
+        tags.push(tag);
+      }
+    }
+  }
+  return tags;
+}
+
+function modelForGroup(groupCards: ExportCard[]): AnkiExportModel {
+  const supplied = groupCards.find((card) => card.model)?.model;
+  const fields = supplied?.fields?.length
+    ? supplied.fields
+    : Object.keys(groupCards[0]?.noteFields ?? groupCards[0]?.fields ?? {}).map((name, ord) => ({ name, ord }));
+  const templates = supplied?.templates?.length
+    ? supplied.templates
+    : groupCards.filter((card) => card.template).map((card) => card.template as AnkiTemplate);
+  return {
+    id: supplied?.id,
+    name: supplied?.name ?? "Flashi Basic",
+    type: supplied?.type ?? (templates.some((template) => template.cardKind === "cloze") ? 1 : 0),
+    css: supplied?.css ?? ".card { font-family: arial; font-size: 20px; text-align: center; color: black; background-color: white; }",
+    fields,
+    templates,
+  };
+}
+
+function templatesForGroup(group: ExportGroup): AnkiTemplate[] {
+  const fieldNames = Object.keys(group.fields);
+  if (fieldNames.length === 0) throw new Error(`Anki note ${group.noteId} has no fields to export`);
+  const templates = group.model.templates?.slice().sort((a, b) => a.ord - b.ord) ?? [];
+  const highestOrdinal = Math.max(...group.cards.map((card, index) => Number.isInteger(card.cardOrdinal) ? Number(card.cardOrdinal) : index), 0);
+  const result = templates.slice();
+  for (let ordinal = 0; ordinal <= highestOrdinal; ordinal += 1) {
+    if (result.some((template) => template.ord === ordinal)) continue;
+    const card = group.cards.find((candidate, index) => (Number.isInteger(candidate.cardOrdinal) ? Number(candidate.cardOrdinal) : index) === ordinal);
+    if (!card) throw new Error(`Anki note ${group.noteId} has card ordinal ${ordinal} without template metadata; cannot invent a card template`);
+    const first = fieldNames[0] ?? "Front";
+    const second = fieldNames[1] ?? first;
+    result.push({
+      name: `Card ${ordinal + 1}`,
+      ord: ordinal,
+      qfmt: `{{${first}}}`,
+      afmt: `{{FrontSide}}<hr id=answer>{{${second}}}`,
+      cardKind: card.cardKind ?? "basic",
+      clozeOrdinal: card.cardKind === "cloze" ? (card.clozeOrdinal ?? ordinal + 1) : null,
+    });
+  }
+  return result.sort((left, right) => left.ord - right.ord);
+}
 
 export async function buildAnkiPackage(cards: ExportCard[]): Promise<Uint8Array> {
   if (cards.length === 0) throw new Error("At least one card is required for Anki export");
   const sqlite3 = await sqlite3InitModule();
   const db = new sqlite3.oo1.DB(":memory:", "c");
   const now = Math.floor(Date.now() / 1000);
-  const modelId = 1607392319;
-  const deckIds = new Map<string, number>();
+  const groups = new Map<string, ExportGroup>();
   for (const card of cards) {
-    if (!deckIds.has(card.deckId)) deckIds.set(card.deckId, numericId(card.deckId, deckIds.size + 1));
+    const noteId = card.noteId ?? card.id;
+    const existing = groups.get(noteId);
+    if (existing) {
+      if (existing.deckId !== card.deckId) throw new Error(`Cards in note ${noteId} belong to different decks`);
+      existing.cards.push(card);
+      existing.tags = mergeTags(existing.cards);
+    } else {
+      const fields = card.noteFields ?? card.fields;
+      groups.set(noteId, {
+        noteId,
+        deckId: card.deckId,
+        deckName: card.deckName,
+        fields,
+        tags: card.tags.slice(),
+        model: modelForGroup([card]),
+        cards: [card],
+      });
+    }
+  }
+  for (const group of groups.values()) {
+    group.model = modelForGroup(group.cards);
+    group.tags = mergeTags(group.cards);
+    const fieldNames = Object.keys(group.fields);
+    group.model.fields = (group.model.fields?.length ? group.model.fields : fieldNames.map((name, ord) => ({ name, ord }))).map((field, index) => ({ name: field.name, ord: field.ord ?? index }));
+    group.model.templates = templatesForGroup(group);
+  }
+
+  const deckIds = new Map<string, number>();
+  const usedDeckIds = new Set<number>();
+  for (const card of cards) {
+    if (!deckIds.has(card.deckId)) deckIds.set(card.deckId, uniqueNumericId(card.deckId, deckIds.size + 1, usedDeckIds));
   }
   const deckObject: Record<string, unknown> = {};
-  for (const card of cards) {
-    const did = deckIds.get(card.deckId) ?? 1;
+  for (const group of groups.values()) {
+    const did = deckIds.get(group.deckId) ?? 1;
     deckObject[String(did)] = {
       id: did,
-      name: card.deckName.slice(0, 120),
+      name: group.deckName.slice(0, 120),
       desc: "Exported from Flashi",
       dyn: 0,
       collapsed: false,
@@ -259,26 +480,34 @@ export async function buildAnkiPackage(cards: ExportCard[]): Promise<Uint8Array>
       lrnToday: [now, 0],
     };
   }
-  const model = {
-    [String(modelId)]: {
-      id: modelId,
-      name: "Flashi Basic",
-      type: 0,
-      mod: now,
-      usn: -1,
-      sortf: 0,
-      did: null,
-      flds: [
-        { name: "Front", ord: 0, sticky: false, rtl: false, font: "Arial", size: 20 },
-        { name: "Back", ord: 1, sticky: false, rtl: false, font: "Arial", size: 20 },
-      ],
-      tmpls: [{ name: "Card 1", ord: 0, qfmt: "{{Front}}", afmt: "{{FrontSide}}<hr id=answer>{{Back}}", did: null, bqfmt: "", bafmt: "" }],
-      css: ".card { font-family: arial; font-size: 20px; text-align: center; color: black; background-color: white; }",
-      latexPre: "",
-      latexPost: "",
-      req: [[0, "all", [0, 1]]],
-    },
-  };
+
+  const modelIds = new Map<string, number>();
+  const usedModelIds = new Set<number>();
+  const modelObject: Record<string, unknown> = {};
+  for (const group of groups.values()) {
+    const modelKey = JSON.stringify({ id: group.model.id ?? "", name: group.model.name, fields: group.model.fields, templates: group.model.templates });
+    if (!modelIds.has(modelKey)) {
+      const modelId = uniqueNumericId(group.model.id ?? modelKey, 1_600_000_000 + modelIds.size, usedModelIds);
+      modelIds.set(modelKey, modelId);
+      const modelFields = group.model.fields ?? [];
+      const modelTemplates = group.model.templates ?? [];
+      modelObject[String(modelId)] = {
+        id: modelId,
+        name: String(group.model.name ?? "Flashi Basic").slice(0, 120),
+        type: group.model.type ?? 0,
+        mod: now,
+        usn: -1,
+        sortf: 0,
+        did: null,
+        flds: modelFields.map((field, index) => ({ name: field.name, ord: field.ord ?? index, sticky: false, rtl: false, font: "Arial", size: 20 })),
+        tmpls: modelTemplates.map((template) => ({ name: template.name, ord: template.ord, qfmt: template.qfmt, afmt: template.afmt, did: null, bqfmt: "", bafmt: "" })),
+        css: String(group.model.css ?? ""),
+        latexPre: "",
+        latexPost: "",
+        req: modelTemplates.map((template) => [template.ord, template.cardKind === "cloze" ? "any" : "all", modelFields.map((_field, index) => index)]),
+      };
+    }
+  }
 
   db.exec(`
     pragma user_version = 11;
@@ -294,48 +523,59 @@ export async function buildAnkiPackage(cards: ExportCard[]): Promise<Uint8Array>
   `);
   db.exec({
     sql: "insert into col values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    bind: [1, now, now, Date.now(), 11, 0, -1, 0, JSON.stringify({}), JSON.stringify(model), JSON.stringify(deckObject), JSON.stringify({}), "{}"],
+    bind: [1, now, now, Date.now(), 11, 0, -1, 0, JSON.stringify({}), JSON.stringify(modelObject), JSON.stringify(deckObject), JSON.stringify({}), "{}"],
   });
 
   const archive: Record<string, Uint8Array> = {};
   const media: Record<string, string> = {};
-  const mediaByPath = new Map<string, string>();
+  const mediaByFilename = new Map<string, { archiveKey: string; bytes: Uint8Array }>();
   let mediaIndex = 0;
   let noteIndex = 0;
-  for (const card of cards) {
+  for (const group of groups.values()) {
     noteIndex += 1;
     const nid = 1_000_000_000 + noteIndex;
-    const cid = nid * 10;
-    const did = deckIds.get(card.deckId) ?? 1;
-    const front = String(card.fields.Front ?? "");
-    const back = String(card.fields.Back ?? "");
-    const fields = `${front}${FIELD_SEPARATOR}${back}`;
-    const tags = card.tags.map((tag) => tag.replace(/\s+/g, "_")).join(" ");
+    const modelKey = JSON.stringify({ id: group.model.id ?? "", name: group.model.name, fields: group.model.fields, templates: group.model.templates });
+    const mid = modelIds.get(modelKey);
+    if (!mid) throw new Error(`Missing Anki model for note ${group.noteId}`);
+    const did = deckIds.get(group.deckId) ?? 1;
+    const fields = group.model.fields ?? Object.keys(group.fields).map((name, ord) => ({ name, ord }));
+    const values = fields.map((field) => String(group.fields[field.name] ?? ""));
+    const tags = group.tags.map((tag) => {
+      if (!tag || /\s/.test(tag) || tag.length > 60) throw new Error(`Anki tag ${tag || "(empty)"} cannot be represented by Flashi's tag schema without loss`);
+      return tag;
+    }).join(" ");
     db.exec({
       sql: "insert into notes values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      bind: [nid, `flashi-${card.id}`, modelId, now, -1, tags, fields, front, 0, 0, ""],
+      bind: [nid, `flashi-${group.noteId}`, mid, now, -1, tags, values.join(FIELD_SEPARATOR), values[0] ?? "", 0, 0, ""],
     });
-    db.exec({
-      sql: "insert into cards values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      bind: [cid, nid, did, 0, now, -1, 0, 0, noteIndex, 0, 0, 0, 0, 0, 0, 0, 0, ""],
-    });
-
-    for (const item of card.media) {
-      const normalized = item.filename.replaceAll("\\", "/");
-      let archiveName = mediaByPath.get(normalized);
-      if (!archiveName) {
-        archiveName = `${mediaIndex}`;
-        mediaIndex += 1;
-        mediaByPath.set(normalized, archiveName);
-        media[archiveName] = normalized;
-        archive[archiveName] = item.bytes;
+    const usedOrdinals = new Set<number>();
+    group.cards.forEach((card, index) => {
+      const ordinal = Number.isInteger(card.cardOrdinal) ? Number(card.cardOrdinal) : index;
+      if (ordinal < 0 || usedOrdinals.has(ordinal)) throw new Error(`Anki note ${group.noteId} has duplicate or invalid card ordinal ${ordinal}`);
+      usedOrdinals.add(ordinal);
+      const cid = nid * 100 + index + 1;
+      const cardTemplate = group.model.templates?.find((template) => template.ord === ordinal);
+      if (!cardTemplate) throw new Error(`Anki note ${group.noteId} card ordinal ${ordinal} has no template metadata; refusing to invent a card`);
+      db.exec({
+        sql: "insert into cards values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        bind: [cid, nid, did, ordinal, now, -1, group.model.type === 1 ? 1 : 0, 0, index + 1, 0, 0, 0, 0, 0, 0, 0, 0, ""],
+      });
+      for (const item of card.media) {
+        const filename = exportFilename(item.filename);
+        const existing = mediaByFilename.get(filename);
+        if (existing) {
+          if (existing.bytes.byteLength !== item.bytes.byteLength || existing.bytes.some((value, byteIndex) => value !== item.bytes[byteIndex])) {
+            throw new Error(`Anki media filename ${filename} has different bytes in the same export; refusing ambiguous media`);
+          }
+        } else {
+          const archiveKey = String(mediaIndex++);
+          mediaByFilename.set(filename, { archiveKey, bytes: item.bytes });
+          media[archiveKey] = filename;
+          archive[archiveKey] = item.bytes;
+        }
       }
-    }
+    });
   }
-  db.exec({
-    sql: "insert into revlog select 1, ?, -1, 3, 0, 0, 0, 0, 0 where 0",
-    bind: [1],
-  });
   archive["media"] = strToU8(JSON.stringify(media));
   const dbPointer = db.pointer as number | undefined;
   if (dbPointer === undefined) {

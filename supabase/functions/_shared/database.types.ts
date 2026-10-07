@@ -1526,6 +1526,7 @@ export type Database = {
     }
     Functions: {
       process_activation: { Args: { p_idempotency_key: string; p_fingerprint: string; p_request_id?: string; p_goal?: string; p_target_date?: string; p_weekly_minutes?: number }; Returns: Json }
+      update_deck_exam: { Args: { p_exam_id: string; p_exam_name?: string; p_deck_id?: string; p_target_date?: string; p_priority_level?: Database['public']['Enums']['exam_priority_level']; p_status?: string }; Returns: Database['public']['Tables']['deck_exams']['Row'] }
       consume_user_quota: { Args: { p_user_id: string; p_service: string; p_cost_units: number }; Returns: boolean }
       add_user_xp: {
         Args: { p_user_id: string; p_xp_amount: number }

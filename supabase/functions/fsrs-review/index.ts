@@ -249,15 +249,14 @@ Deno.serve(withObservability("fsrs-review", async (request) => {
       throw new Error(`FSRS persistence failed: ${persistError.message}`);
     }
 
+    const { data: persistedRows, error: persistedError } = await (client as any).rpc("get_review_log_by_client_id", { p_card_id: cardId, p_client_review_id: clientReviewId });
+    const persisted = persistedRows?.[0];
+    if (persistedError || !persisted) throw new Error("Persisted review could not be verified");
     return jsonResponse(request, {
-      review_id: reviewId,
-      client_review_id: clientReviewId,
-      card_id: cardId,
-      state: nextState,
-      due_at: nextCard.due.toISOString(),
-      interval_days: nextCard.scheduled_days,
-      stability: nextCard.stability,
-      difficulty: nextCard.difficulty,
+      review_id: persisted.review_id ?? reviewId, client_review_id: clientReviewId, card_id: cardId,
+      state: persisted.new_state, due_at: persisted.new_due_at,
+      interval_days: Number(persisted.new_interval_days), stability: persisted.new_stability,
+      difficulty: persisted.new_difficulty,
     });
   } catch (error) {
     return handleError(error, request, "fsrs-review");

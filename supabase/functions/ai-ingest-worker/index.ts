@@ -74,17 +74,18 @@ async function generateNotes(text: string): Promise<Note[]> {
   return validateNotes(JSON.parse(content).notes);
 }
 async function processOne(client: SupabaseClient, job: Job): Promise<void> {
+  const heartbeat=setInterval(()=>void client.from('ai_ingestion_jobs').update({heartbeat_at:new Date().toISOString()}).eq('id',job.job_id).eq('status','processing'),15_000);
   try {
     const { data: allowed, error: quotaError } = await client.rpc("consume_user_quota", { p_user_id: job.user_id, p_service: "ai_ingest", p_cost_units: 1 });
     if (quotaError || allowed !== true) throw new Error("QUOTA_EXCEEDED");
     const notes = await generateNotes(await sourceText(job, client));
-    const { error } = await client.rpc("materialize_ai_ingestion_batch", { p_job_id: job.job_id, p_user_id: job.user_id, p_deck_id: job.deck_id, p_notes: notes });
+    const { error } = await client.from('ai_ingestion_jobs').update({result_draft:notes,status:'awaiting_review',notes_generated_count:notes.length,cards_generated_count:notes.reduce((sum,note)=>sum+note.cards.length,0),heartbeat_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',job.job_id).eq('user_id',job.user_id).eq('status','processing');
     if (error) throw new Error(error.message);
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Worker failed";
     await client.from("ai_ingestion_jobs").update({ status: "failed", error_message: message, updated_at: new Date().toISOString() }).eq("id", job.job_id).eq("status", "processing");
     throw error;
-  }
+  } finally { clearInterval(heartbeat); }
 }
 function jwtRole(request: Request): string | null {
   const token = request.headers.get("Authorization")?.replace(/^Bearer\s+/, "");
@@ -95,15 +96,17 @@ Deno.serve(withObservability("ai-ingest-worker", async (request) => {
   const preflight = handleCorsPreflight(request);
   if (preflight) return preflight;
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: corsHeaders });
-  if (jwtRole(request) !== "service_role" || request.headers.get("x-worker-secret") !== Deno.env.get("INGESTION_WORKER_SECRET")) return new Response("Unauthorized", { status: 401, headers: corsHeaders });
+  if (jwtRole(request) !== "service_role" || (Deno.env.get("INGESTION_WORKER_SECRET") && request.headers.get("x-worker-secret") !== Deno.env.get("INGESTION_WORKER_SECRET"))) return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   const client = admin(request);
-  const { data, error } = await client.rpc("claim_ai_ingestion_job");
+  const body=await request.json().catch(()=>({})) as {job_id?:string};
+  const {data,error}=body.job_id?await client.rpc('claim_ai_ingestion_job_by_id',{p_job_id:body.job_id}):await client.rpc('claim_ai_ingestion_job');
   if (error) return new Response(JSON.stringify({ error: "claim failed" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   if (!data?.[0]) return new Response(JSON.stringify({ status: "idle" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   const job = data[0] as Job;
   const task = processOne(client, job);
-  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
-    EdgeRuntime.waitUntil(task);
+  const runtime=(globalThis as any).EdgeRuntime;
+  if (runtime?.waitUntil) {
+    runtime.waitUntil(task);
     return new Response(JSON.stringify({ status: "accepted", job_id: job.job_id }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
   try { await task; return new Response(JSON.stringify({ status: "completed", job_id: job.job_id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } }); }

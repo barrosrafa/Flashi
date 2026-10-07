@@ -15,6 +15,8 @@ import { createUserClient, requireUserId } from "../_shared/supabase.ts";
 import {
   buildAnkiPackage,
   parseAnkiPackage,
+  type AnkiExportModel,
+  type AnkiTemplate,
   type ExportCard,
   type ParsedAnkiNote,
 } from "../_shared/anki-apkg.ts";
@@ -71,7 +73,7 @@ async function ensureTemplate(
   userId: string,
   note: ParsedAnkiNote,
 ): Promise<string> {
-  const name = safeName(`Anki model ${note.modelId}`, "Anki model");
+  const name = safeName(`Anki ${note.modelName} (${note.modelId})`, "Anki model");
   const { data: existing, error: existingError } = await client
     .from("card_templates")
     .select("id")
@@ -79,25 +81,58 @@ async function ensureTemplate(
     .eq("name", name)
     .maybeSingle();
   if (existingError) throw new Error(`template query failed: ${existingError.message}`);
-  if (existing?.id) return String(existing.id);
-  const fieldDefinitions = Object.keys(note.fields).map((field, index) => ({ name: field, ord: index }));
-  const cardGeneration = note.cards.map((_card, index) => ({
-    name: `Card ${index + 1}`,
-    front: "{{Front}}",
-    back: "{{Back}}",
+  const fieldDefinitions = note.fieldOrder.map((field, ord) => ({ name: field, ord }));
+  const cardGeneration = note.templates.map((template) => ({
+    name: template.name,
+    ordinal: template.ord,
+    front: template.qfmt,
+    back: template.afmt,
+    card_kind: template.cardKind,
+    cloze_ordinal: template.clozeOrdinal,
   }));
-  const { data, error } = await client
-    .from("card_templates")
-    .insert({
-      user_id: userId,
-      name,
-      field_definitions: fieldDefinitions,
-      card_generation: cardGeneration,
-      is_system: false,
-    })
-    .select("id")
-    .single();
+  let data: { id: string } | null = existing?.id ? { id: String(existing.id) } : null;
+  let error: { message: string } | null = null;
+  if (data) {
+    const updated = await client
+      .from("card_templates")
+      .update({ field_definitions: fieldDefinitions, card_generation: cardGeneration })
+      .eq("id", data.id)
+      .eq("user_id", userId)
+      .select("id")
+      .single();
+    data = updated.data as { id: string } | null;
+    error = updated.error;
+  } else {
+    const created = await client
+      .from("card_templates")
+      .insert({
+        user_id: userId,
+        name,
+        field_definitions: fieldDefinitions,
+        card_generation: cardGeneration,
+        is_system: false,
+      })
+      .select("id")
+      .single();
+    data = created.data as { id: string } | null;
+    error = created.error;
+  }
   if (error || !data) throw new Error(`template creation failed: ${error?.message ?? "no data"}`);
+  const definitions = note.templates.map((template) => ({
+    template_id: String(data!.id),
+    ordinal: template.ord,
+    name: template.name,
+    card_kind: template.cardKind,
+    front_template: template.qfmt,
+    back_template: template.afmt,
+    cloze_ordinal: template.clozeOrdinal,
+  }));
+  if (definitions.length > 0) {
+    const { error: definitionError } = await client
+      .from("note_card_definitions")
+      .upsert(definitions, { onConflict: "template_id,ordinal" });
+    if (definitionError) throw new Error(`template definition preservation failed: ${definitionError.message}`);
+  }
   return String(data.id);
 }
 
@@ -107,8 +142,10 @@ async function upsertTags(
   names: string[],
 ): Promise<string[]> {
   const ids: string[] = [];
-  for (const rawName of names.slice(0, 100)) {
-    const name = safeName(rawName, "tag").slice(0, 60);
+  for (const name of names) {
+    if (!name || /\s/.test(name) || name.length > 60) {
+      throw new Error(`Anki tag ${name || "(empty)"} cannot be represented by Flashi's tag schema without loss (max 60 characters, no spaces)`);
+    }
     const { data, error } = await client
       .from("tags")
       .upsert({ user_id: userId, name }, { onConflict: "user_id,name" })
@@ -130,6 +167,19 @@ async function importPackage(
   const parsed = await parseAnkiPackage(bytes);
   if (parsed.notes.length === 0) throw new RequestError("Anki package contains no importable notes", 422);
   if (parsed.notes.length > MAX_NOTES) throw new RequestError(`Anki package exceeds ${MAX_NOTES} notes`, 413);
+  if (parsed.notes.some((note) => note.cards.length === 0)) {
+    throw new RequestError("Anki package contains a note without a real cards row; no synthetic Basic card was created. Re-export the note from Anki with its cards intact.", 422);
+  }
+  const referencedMedia = new Set<string>();
+  for (const note of parsed.notes) {
+    for (const [archiveKey, filename] of Object.entries(parsed.media)) {
+      if (Object.values(note.fields).some((field) => field.includes(filename))) referencedMedia.add(archiveKey);
+    }
+  }
+  const unreferencedMedia = Object.keys(parsed.media).filter((archiveKey) => !referencedMedia.has(archiveKey));
+  if (unreferencedMedia.length > 0) {
+    throw new RequestError(`Anki package contains ${unreferencedMedia.length} media file(s) not referenced by any note field; import aborted instead of silently dropping bytes. Attach them to a field in Anki and re-export.`, 422);
+  }
   const deck = await ensureTargetDeck(client, userId, targetDeckName);
   let importedNotes = 0;
   let importedCards = 0;
@@ -154,10 +204,12 @@ async function importPackage(
     const templateId = await ensureTemplate(client, userId, note);
     const contentHash = await sha256Hex(JSON.stringify(note.fields));
     const cardDefinitions = note.cards.map((card) => ({
+      card_ordinal: card.ordinal,
       card_kind: card.cardKind,
       cloze_ordinal: card.clozeOrdinal === null ? null : String(card.clozeOrdinal),
       front: card.front,
       back: card.back,
+      fields: { ...note.fields, Front: card.front, Back: card.back },
     }));
     const { data: created, error: createError } = await client.rpc("mcp_create_note", {
       p_deck_id: deck.id,
@@ -200,6 +252,7 @@ async function importPackage(
     for (const [archiveKey, filename] of matchingMedia) {
       const mediaBytes = parsed.files[archiveKey];
       if (!mediaBytes) continue;
+      const sha256 = await sha256Hex(mediaBytes);
       const mediaPath = `${userId}/anki/${jobId}/${archiveKey}-${safeName(filename, archiveKey)}`;
       const { error: uploadError } = await client.storage.from("card-media").upload(mediaPath, mediaBytes, {
         contentType: mimeFromFilename(filename).mimeType,
@@ -207,16 +260,19 @@ async function importPackage(
       });
       if (uploadError) throw new Error(`media upload failed: ${uploadError.message}`);
       const { mediaType, mimeType } = mimeFromFilename(filename);
-      const mediaRows = cardIds.map((cardId) => ({
+      const fieldNames = Object.entries(note.fields)
+        .filter(([, value]) => value.includes(filename))
+        .map(([fieldName]) => fieldName);
+      const mediaRows = cardIds.flatMap((cardId) => fieldNames.map((fieldName) => ({
         card_id: cardId,
         user_id: userId,
-        field_name: Object.entries(note.fields).find(([, value]) => value.includes(filename))?.[0] ?? null,
+        field_name: fieldName,
         media_type: mediaType,
         storage_path: mediaPath,
         file_size_bytes: mediaBytes.byteLength,
         mime_type: mimeType,
-        metadata: { anki_filename: filename, anki_archive_key: archiveKey },
-      }));
+        metadata: { anki_filename: filename, anki_archive_key: archiveKey, anki_sha256: sha256 },
+      })));
       const { error: mediaRowError } = await client.from("card_media").insert(mediaRows);
       if (mediaRowError) throw new Error(`media metadata insert failed: ${mediaRowError.message}`);
       uploadedMedia += 1;
@@ -237,6 +293,62 @@ async function importPackage(
   };
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+type AnkiNoteRow = { id: string; fields: unknown; template_id: string | null };
+type AnkiCardRow = {
+  id: string;
+  note_id: string;
+  note_group_id: string | null;
+  deck_id: string;
+  fields: unknown;
+  card_ordinal: number | null;
+  card_kind: string | null;
+  cloze_ordinal: number | null;
+  template_id: string | null;
+};
+type AnkiTemplateRow = {
+  id: string;
+  name: string;
+  field_definitions: unknown;
+  card_generation: unknown;
+};
+
+function modelFromTemplateRow(row: Record<string, unknown> | null, fields: Record<string, unknown>): AnkiExportModel {
+  const fieldDefinitions = Array.isArray(row?.field_definitions) ? row.field_definitions : [];
+  const modelFields = fieldDefinitions
+    .map((value, index) => {
+      const definition = objectValue(value);
+      const name = typeof definition.name === "string" ? definition.name : "";
+      return name ? { name, ord: Number.isInteger(definition.ord) ? Number(definition.ord) : index } : null;
+    })
+    .filter((value): value is { name: string; ord: number } => value !== null);
+  const rawGeneration = Array.isArray(row?.card_generation) ? row.card_generation : [];
+  const templates: AnkiTemplate[] = rawGeneration.map((value, index) => {
+    const generation = objectValue(value);
+    const ord = Number.isInteger(generation.ordinal) ? Number(generation.ordinal) : index;
+    const kind = generation.card_kind === "cloze" || generation.card_kind === "reverse" ? generation.card_kind : "basic";
+    return {
+      name: typeof generation.name === "string" ? generation.name : `Card ${ord + 1}`,
+      ord,
+      qfmt: typeof generation.front === "string" ? generation.front : "",
+      afmt: typeof generation.back === "string" ? generation.back : "",
+      cardKind: kind,
+      clozeOrdinal: Number.isInteger(generation.cloze_ordinal) ? Number(generation.cloze_ordinal) : null,
+    };
+  });
+  return {
+    id: row?.id ? String(row.id) : undefined,
+    name: typeof row?.name === "string" ? row.name : "Flashi Basic",
+    type: templates.some((template) => template.cardKind === "cloze") ? 1 : 0,
+    css: ".card { font-family: arial; font-size: 20px; text-align: center; color: black; background-color: white; }",
+    fields: modelFields.length > 0 ? modelFields : Object.keys(fields).map((name, ord) => ({ name, ord })),
+    templates,
+  };
+}
+
 async function exportDeck(
   client: ReturnType<typeof createUserClient>,
   userId: string,
@@ -254,21 +366,45 @@ async function exportDeck(
   if (deckError) throw new Error(`deck query failed: ${deckError.message}`);
   if (!deck) throw new RequestError("Deck not found", 404);
 
+  // Notes define grouping and all original fields. Cards are queried
+  // independently so an export never infers cards from a template.
+  const { data: notes, error: noteError } = await client
+    .from("notes")
+    .select("id, fields, template_id")
+    .eq("deck_id", deckId)
+    .eq("user_id", userId)
+    .is("deleted_at", null)
+    .order("created_at", { ascending: true })
+    .limit(10_000);
+  if (noteError) throw new Error(`note query failed: ${noteError.message}`);
+  if (!notes || notes.length === 0) throw new RequestError("Deck contains no exportable notes", 422);
+  const noteRows = notes as unknown as AnkiNoteRow[];
+  const noteIds = noteRows.map((note: AnkiNoteRow) => String(note.id));
   const { data: cards, error: cardError } = await client
     .from("cards")
-    .select("id, deck_id, fields")
+    .select("id, note_id, note_group_id, deck_id, fields, card_ordinal, card_kind, cloze_ordinal, template_id")
+    .in("note_id", noteIds)
     .eq("deck_id", deckId)
     .eq("user_id", userId)
     .is("deleted_at", null)
     .order("created_at", { ascending: true })
     .limit(10_000);
   if (cardError) throw new Error(`card query failed: ${cardError.message}`);
-  if (!cards || cards.length === 0) throw new RequestError("Deck contains no exportable cards", 422);
+  if (!cards || cards.length === 0) throw new RequestError("Deck contains notes but no real cards to export", 422);
+  const cardRows = cards as unknown as AnkiCardRow[];
 
-  const cardIds = cards.map((card) => String(card.id));
+  const cardIds = cardRows.map((card: AnkiCardRow) => String(card.id));
+  const templateIds = Array.from(new Set(noteRows.map((note: AnkiNoteRow) => note.template_id).filter(Boolean).map(String)));
+  const { data: templateRows, error: templateError } = templateIds.length > 0
+    ? await client.from("card_templates").select("id, name, field_definitions, card_generation").in("id", templateIds)
+    : { data: [], error: null };
+  if (templateError) throw new Error(`template query failed: ${templateError.message}`);
+  const templateRowList = (templateRows ?? []) as unknown as AnkiTemplateRow[];
+  const templatesById = new Map(templateRowList.map((row: AnkiTemplateRow) => [String(row.id), row as unknown as Record<string, unknown>]));
+
   const { data: mediaRows, error: mediaError } = includeMedia
     ? await client.from("card_media")
-      .select("card_id, field_name, storage_path, metadata")
+      .select("card_id, field_name, storage_path, file_size_bytes, metadata")
       .in("card_id", cardIds)
       .eq("user_id", userId)
       .limit(MAX_MEDIA_PER_JOB)
@@ -288,30 +424,59 @@ async function exportDeck(
     const name = typeof tag?.name === "string" ? tag.name : "";
     if (!name) continue;
     const names = tagsByCard.get(String(row.card_id)) ?? [];
-    names.push(name);
+    if (!names.includes(name)) names.push(name);
     tagsByCard.set(String(row.card_id), names);
   }
 
-  const mediaByCard = new Map<string, Array<{ fieldName: string | null; filename: string; bytes: Uint8Array }>>();
+  const mediaByCard = new Map<string, Array<{ fieldName: string | null; filename: string; bytes: Uint8Array; sha256: string }>>();
   for (const row of mediaRows ?? []) {
-    const metadata = typeof row.metadata === "object" && row.metadata !== null ? row.metadata as Record<string, unknown> : {};
-    const filename = safeName(String(metadata.anki_filename ?? String(row.storage_path).split("/").pop() ?? "media"), "media");
+    const metadata = objectValue(row.metadata);
+    const filename = String(metadata.anki_filename ?? String(row.storage_path).split("/").pop() ?? "media");
+    if (!filename || filename.includes("..")) throw new Error(`Unsafe Anki media filename in metadata: ${filename}`);
     const { data: blob, error: downloadError } = await client.storage.from("card-media").download(String(row.storage_path));
     if (downloadError || !blob) throw new Error(`media download failed: ${downloadError?.message ?? "no data"}`);
     const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (row.file_size_bytes !== null && row.file_size_bytes !== undefined && Number(row.file_size_bytes) !== bytes.byteLength) {
+      throw new Error(`media byte length mismatch for ${filename}; refusing to export corrupted bytes`);
+    }
+    const sha256 = await sha256Hex(bytes);
+    if (typeof metadata.anki_sha256 === "string" && metadata.anki_sha256 !== sha256) {
+      throw new Error(`media SHA-256 mismatch for ${filename}; refusing to export corrupted bytes`);
+    }
     const entries = mediaByCard.get(String(row.card_id)) ?? [];
-    entries.push({ fieldName: row.field_name ? String(row.field_name) : null, filename, bytes });
+    entries.push({ fieldName: row.field_name ? String(row.field_name) : null, filename, bytes, sha256 });
     mediaByCard.set(String(row.card_id), entries);
   }
 
-  const exportCards: ExportCard[] = cards.map((card) => ({
-    id: String(card.id),
-    deckId: String(card.deck_id),
-    deckName: String(deck.name),
-    fields: (typeof card.fields === "object" && card.fields !== null) ? card.fields as Record<string, unknown> : {},
-    tags: tagsByCard.get(String(card.id)) ?? [],
-    media: mediaByCard.get(String(card.id)) ?? [],
-  }));
+  const notesById = new Map(noteRows.map((note: AnkiNoteRow) => [String(note.id), note]));
+  const exportCards: ExportCard[] = cardRows.map((card: AnkiCardRow) => {
+    const note = notesById.get(String(card.note_id));
+    if (!note) throw new Error(`Card ${card.id} has no parent note; refusing to break note grouping`);
+    const noteFields = objectValue(note.fields);
+    const templateId = note.template_id ? String(note.template_id) : (card.template_id ? String(card.template_id) : "");
+    const model = modelFromTemplateRow(templatesById.get(templateId) ?? null, noteFields);
+    const ordinal = Number.isInteger(card.card_ordinal) ? Number(card.card_ordinal) : null;
+    const template = ordinal === null ? undefined : model.templates?.find((candidate) => candidate.ord === ordinal);
+    if (ordinal !== null && model.templates?.length && !template) {
+      throw new Error(`Card ${card.id} ordinal ${ordinal} has no saved template metadata; refusing to invent a template`);
+    }
+    const kind = card.card_kind === "cloze" || card.card_kind === "reverse" ? card.card_kind : "basic";
+    return {
+      id: String(card.id),
+      noteId: String(note.id),
+      deckId: String(card.deck_id),
+      deckName: String(deck.name),
+      fields: objectValue(card.fields),
+      noteFields,
+      tags: tagsByCard.get(String(card.id)) ?? [],
+      cardOrdinal: ordinal ?? undefined,
+      cardKind: kind,
+      clozeOrdinal: Number.isInteger(card.cloze_ordinal) ? Number(card.cloze_ordinal) : null,
+      template,
+      model,
+      media: mediaByCard.get(String(card.id)) ?? [],
+    };
+  });
   const bytes = await buildAnkiPackage(exportCards);
   const storagePath = `${userId}/exports/${jobId}.apkg`;
   return { bytes, totalCards: cards.length, storagePath };

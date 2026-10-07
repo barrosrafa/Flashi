@@ -11,6 +11,7 @@ export type ImportNote = {
   cards: Card[];
 };
 const MAX_NOTES = 10_000;
+const MAX_IMPORT_BYTES = 15 * 1024 * 1024;
 
 function note(front: string, back: string, ordinal: number): ImportNote {
   return {
@@ -106,7 +107,9 @@ function delimitedNotes(text: string, delimiter: string): ImportNote[] {
   if (dataRows.length > MAX_NOTES) {
     throw new RequestError(`Import is limited to ${MAX_NOTES} notes`, 413);
   }
-  return dataRows.map((parts, index) => {
+  const seen = new Set<string>();
+  const result: ImportNote[] = [];
+  dataRows.forEach((parts, index) => {
     const front = parts[0]?.trim() ?? "";
     const back = parts.slice(1).join(delimiter).trim();
     if (!front || !back) {
@@ -115,8 +118,14 @@ function delimitedNotes(text: string, delimiter: string): ImportNote[] {
         422,
       );
     }
-    return note(front, back, index);
+    const normalizedFront = front.normalize("NFC");
+    const normalizedBack = back.normalize("NFC");
+    const duplicateKey = `${normalizedFront}\u0000${normalizedBack}`;
+    if (seen.has(duplicateKey)) return;
+    seen.add(duplicateKey);
+    result.push(note(normalizedFront, normalizedBack, result.length));
   });
+  return result;
 }
 
 function markdownNotes(text: string): ImportNote[] {
@@ -150,10 +159,14 @@ function markdownNotes(text: string): ImportNote[] {
 }
 
 export function parseImportText(text: string, format: string): ImportNote[] {
+  if (new TextEncoder().encode(text).byteLength > MAX_IMPORT_BYTES) {
+    throw new RequestError("Import file exceeds 15 MiB", 413);
+  }
   if (format === "csv") return delimitedNotes(text, ",");
   if (format === "quizlet") {
     const firstLine = text.split(/\r?\n/, 1)[0] ?? "";
     return delimitedNotes(text, firstLine.includes("\t") ? "\t" : ",");
   }
-  return markdownNotes(text);
+  if (format === "markdown" || format === "remnote") return markdownNotes(text);
+  throw new RequestError("Unsupported import format", 400);
 }

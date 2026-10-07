@@ -1,3 +1,5 @@
+import { dispatchEdge } from '../_shared/dispatch.ts';
+import { getRequestId } from '../_shared/http.ts';
 import { withObservability } from "../_shared/observability.ts";
 import {
   handleCors,
@@ -30,13 +32,21 @@ Deno.serve(withObservability("fsrs-optimize", async (request) => {
     const mode = body.mode === undefined
       ? "request"
       : requireString(body.mode, "mode", { maxLength: 16 }).toLowerCase();
-    if (mode !== "request" && mode !== "run") {
+    if (mode !== "request" && mode !== "run" && mode !== "dispatch") {
       throw new RequestError("mode must be request or run", 400);
     }
 
+    const launch=(id:string)=>dispatchEdge('fsrs-optimize',{mode:'run',run_id:id},request.headers.get('authorization')??'',getRequestId(request));
+    if(mode === 'dispatch') {
+      const id=requireUuid(body.run_id,'run_id');
+      const {data:run,error}=await client.from('fsrs_optimization_runs').select('id').eq('id',id).eq('user_id',userId).eq('status','queued').maybeSingle();
+      if(error||!run)throw new RequestError('Otimização não disponível.',404,'JOB_NOT_FOUND');
+      void launch(id); return jsonResponse(request,{run_id:id,status:'queued'},202);
+    }
     if (mode === "request") {
       const { data: runId, error } = await client.rpc("enqueue_fsrs_optimization");
-      if (error) throw new Error(`optimization enqueue failed: ${error.message}`);
+      if(error) { if(/requires at least/.test(error.message))throw new RequestError('Ainda não há revisões suficientes para personalizar o agendador. Continue estudando; os parâmetros padrão continuam disponíveis.',422,'OPTIMIZER_NOT_READY'); throw new Error('OPTIMIZER_ENQUEUE_FAILED'); }
+      void launch(String(runId));
       return jsonResponse(request, { user_id: userId, status: "queued", run_id: runId }, 202);
     }
 
