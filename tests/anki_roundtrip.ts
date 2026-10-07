@@ -79,6 +79,17 @@ const cards: ExportCard[] = [
 const bytes = await buildAnkiPackage(cards);
 const archive = unzipSync(bytes);
 if (!archive["collection.anki2"] || !archive["media"]) throw new Error("Missing core Anki files");
+const staleBytes = await buildAnkiPackage([cards[0]!]);
+const staleArchive = unzipSync(staleBytes);
+const dualCollectionPackage = zipSync({
+  ...archive,
+  "collection.anki21": archive["collection.anki2"]!,
+  "collection.anki2": staleArchive["collection.anki2"]!,
+});
+const preferredCollection = await parseAnkiPackage(dualCollectionPackage);
+if (preferredCollection.notes.length !== 2) {
+  throw new Error(`Expected collection.anki21 to win when both collection files exist; got ${preferredCollection.notes.length} notes`);
+}
 const parsed = await parseAnkiPackage(bytes);
 if (parsed.notes.length !== 2) throw new Error(`Expected two grouped notes, got ${parsed.notes.length}`);
 const basic = parsed.notes.find((note) => note.modelName === "Basic with Extra");

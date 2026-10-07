@@ -132,7 +132,7 @@ A função `anki-transfer` impõe 50 MiB por pacote, 20.000 entradas ZIP, 10.000
 }
 ```
 
-São aceitos `collection.anki2` e `collection.anki21`. `collection.anki21b` é rejeitado explicitamente. O parser lê modelos, campos, templates, tags e cartões com SQLite WASM. Cloze simples, condicionais básicas, `FrontSide` e referências de campo são renderizados para a representação Flashi. Uma nota sem cartão renderizável usa fallback Basic. Tags são normalizadas e vinculadas aos cartões. Mídia é copiada somente quando o filename aparece em algum campo, com MIME derivado, tamanho e metadata de origem.
+São aceitos `collection.anki2` e `collection.anki21`. Se ambas estiverem presentes, `collection.anki21` tem precedência, pois a cópia `collection.anki2` pode estar desatualizada. `collection.anki21b` é rejeitado explicitamente. O parser lê modelos, campos, templates, tags e cartões com SQLite WASM. Cloze simples, condicionais básicas, `FrontSide` e referências de campo são renderizados para a representação Flashi. Uma nota sem cartão renderizável usa fallback Basic. Tags são normalizadas e vinculadas aos cartões. Mídia é copiada somente quando o filename aparece em algum campo, com MIME derivado, tamanho e metadata de origem.
 
 A função calcula SHA-256 antes de criar o job. A combinação `(user_id, direction, file_sha256)` é idempotente: uma importação já concluída pode retornar `skipped` sem duplicar conteúdo. A resposta de sucesso inclui `job_id`, `deck_id`, `deck_name`, `total_notes`, `imported_notes`, `imported_cards`, `skipped_notes` e `uploaded_media`.
 

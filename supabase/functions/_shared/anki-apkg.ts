@@ -158,7 +158,9 @@ function findCollection(files: Record<string, Uint8Array>): Uint8Array {
   if (files["collection.anki21b"]) {
     throw new Error("collection.anki21b is not supported yet; export a legacy .apkg with collection.anki2 or collection.anki21 from Anki");
   }
-  for (const filename of ["collection.anki2", "collection.anki21"]) {
+  // When both files are present, Anki's .anki21 is the current collection;
+  // .anki2 may be a compatibility copy or stale snapshot with older notes/media.
+  for (const filename of ["collection.anki21", "collection.anki2"]) {
     if (files[filename]) return files[filename];
   }
   throw new Error("Anki package does not contain collection.anki2 or collection.anki21");
