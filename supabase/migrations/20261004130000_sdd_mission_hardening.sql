@@ -145,26 +145,34 @@ revoke execute on function public.process_activation(text, text, text) from publ
 grant execute on function public.process_activation(text, text, text) to authenticated;
 
 create or replace function public.consume_user_rate_limit(
-  p_scope text,
-  p_limit integer,
-  p_window_seconds integer
-) returns boolean
-language plpgsql security definer set search_path = public
+  p_function_name text,
+  p_limit integer default 30,
+  p_window_seconds integer default 60
+)
+returns table(allowed boolean, retry_after_seconds integer)
+language plpgsql
+security definer
+set search_path = public
 as $$
 declare
-  v_user_id uuid := auth.uid();
-  v_now timestamptz := now();
-  v_row public.user_rate_limits%rowtype;
+  v_user_id uuid := (select auth.uid());
+  v_window timestamptz;
+  v_count integer;
 begin
-  if v_user_id is null then return false; end if;
-  if p_scope is null or length(p_scope) < 1 or length(p_scope) > 120 or p_limit < 1 or p_window_seconds < 1 then return false; end if;
-  insert into public.user_rate_limits(user_id, scope, window_started_at, request_count)
-  values (v_user_id, p_scope, v_now, 1)
-  on conflict (user_id, scope) do update set
-    window_started_at = case when public.user_rate_limits.window_started_at + make_interval(secs => p_window_seconds) <= v_now then v_now else public.user_rate_limits.window_started_at end,
-    request_count = case when public.user_rate_limits.window_started_at + make_interval(secs => p_window_seconds) <= v_now then 1 else public.user_rate_limits.request_count + 1 end;
-  select * into v_row from public.user_rate_limits where user_id = v_user_id and scope = p_scope;
-  return v_row.request_count <= p_limit;
+  if v_user_id is null then raise exception 'Authentication is required'; end if;
+  if p_function_name is null or p_function_name !~ '^[a-z0-9-]+$' then raise exception 'Invalid function name'; end if;
+  if p_limit < 1 or p_limit > 10000 or p_window_seconds < 1 or p_window_seconds > 86400 then raise exception 'Invalid rate limit configuration'; end if;
+  v_window := to_timestamp(floor(extract(epoch from clock_timestamp()) / p_window_seconds) * p_window_seconds);
+  insert into public.user_function_rate_limits(user_id, function_name, window_started_at, request_count)
+  values (v_user_id, p_function_name, v_window, 1)
+  on conflict (user_id, function_name, window_started_at) do update
+    set request_count = public.user_function_rate_limits.request_count + 1
+    where public.user_function_rate_limits.request_count < p_limit
+  returning request_count into v_count;
+  if v_count is not null and v_count <= p_limit then
+    return query select true, 0;
+  end if;
+  return query select false, greatest(1, ceil(extract(epoch from (v_window + make_interval(secs => p_window_seconds) - clock_timestamp())))::integer);
 end;
 $$;
 revoke execute on function public.consume_user_rate_limit(text, integer, integer) from public, anon;
